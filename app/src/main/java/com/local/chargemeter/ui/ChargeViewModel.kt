@@ -63,6 +63,10 @@ class ChargeViewModel(application: Application) : AndroidViewModel(application) 
         preferences.getBoolean("monitor_notification_enabled", true),
     )
     val notificationEnabled: StateFlow<Boolean> = _notificationEnabled
+    private val _fluidCloudEnabled = MutableStateFlow(
+        preferences.getBoolean("fluid_cloud_enabled", true),
+    )
+    val fluidCloudEnabled: StateFlow<Boolean> = _fluidCloudEnabled
     private val _hideFromRecents = MutableStateFlow(
         preferences.getBoolean("hide_from_recents", true),
     )
@@ -170,6 +174,11 @@ class ChargeViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             getApplication<Application>().stopService(serviceIntent)
         }
+    }
+
+    fun setFluidCloudEnabled(enabled: Boolean) {
+        _fluidCloudEnabled.value = enabled
+        preferences.edit().putBoolean("fluid_cloud_enabled", enabled).apply()
     }
 
     fun setHideFromRecents(enabled: Boolean) {

@@ -2,6 +2,7 @@ package com.local.chargemeter.ui
 
 import android.os.Build
 import android.graphics.Paint
+import android.app.NotificationManager
 import android.content.Intent
 import android.net.Uri
 import android.os.PowerManager
@@ -116,6 +117,7 @@ import com.local.chargemeter.data.ChargeSample
 import com.local.chargemeter.data.ChargeSession
 import com.local.chargemeter.data.TemperatureSample
 import com.local.chargemeter.monitor.DualCellMode
+import com.local.chargemeter.monitor.FluidCloudPublisher
 import dev.chrisbanes.haze.HazeInput
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.blur.HazeBlurStyle
@@ -176,6 +178,7 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
     val dualCellEnabled by viewModel.dualCellEnabled.collectAsStateWithLifecycle()
     val dualCellMode by viewModel.dualCellMode.collectAsStateWithLifecycle()
     val notificationEnabled by viewModel.notificationEnabled.collectAsStateWithLifecycle()
+    val fluidCloudEnabled by viewModel.fluidCloudEnabled.collectAsStateWithLifecycle()
     val hideFromRecents by viewModel.hideFromRecents.collectAsStateWithLifecycle()
     val currentDirectionInverted by viewModel.currentDirectionInverted.collectAsStateWithLifecycle()
     val currentScaleExponent by viewModel.currentScaleExponent.collectAsStateWithLifecycle()
@@ -294,6 +297,7 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
                     dualCellEnabled = dualCellEnabled,
                     dualCellMode = dualCellMode,
                     notificationEnabled = notificationEnabled,
+                    fluidCloudEnabled = fluidCloudEnabled,
                     hideFromRecents = hideFromRecents,
                     currentDirectionInverted = currentDirectionInverted,
                     currentScaleExponent = currentScaleExponent,
@@ -304,6 +308,7 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
                     onDualCellChange = viewModel::setDualCellEnabled,
                     onDualCellModeChange = viewModel::setDualCellMode,
                     onNotificationEnabledChange = viewModel::setNotificationEnabled,
+                    onFluidCloudEnabledChange = viewModel::setFluidCloudEnabled,
                     onHideFromRecentsChange = viewModel::setHideFromRecents,
                     onCurrentDirectionInvertedChange = viewModel::setCurrentDirectionInverted,
                     onCurrentScaleExponentChange = viewModel::setCurrentScaleExponent,
@@ -523,7 +528,7 @@ private fun HomeScreen(
 @Composable
 private fun AppUsageEntryCard(onClick: () -> Unit) {
     Surface(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).clickable(onClick = onClick),
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).noIndicationClickable(onClick = onClick),
         color = CardBackground,
         shape = RoundedCornerShape(24.dp),
     ) {
@@ -550,7 +555,7 @@ private fun AppUsageEntryCard(onClick: () -> Unit) {
 @Composable
 private fun SettingsEntryCard(ratedMaxPowerW: Double, ratedCapacityMah: Int, onClick: () -> Unit) {
     Surface(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).clickable(onClick = onClick),
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).noIndicationClickable(onClick = onClick),
         color = CardBackground,
         shape = RoundedCornerShape(24.dp),
     ) {
@@ -744,7 +749,7 @@ private fun MetricCard(
 ) {
     Card(
         modifier = modifier.height(166.dp).clip(RoundedCornerShape(28.dp))
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+            .then(if (onClick != null) Modifier.noIndicationClickable(onClick = onClick) else Modifier),
         shape = RoundedCornerShape(28.dp),
         colors = CardDefaults.cardColors(containerColor = CardBackground),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
@@ -773,7 +778,7 @@ private fun SmallStatusCard(
 ) {
     Surface(
         modifier = modifier.clip(RoundedCornerShape(24.dp))
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+            .then(if (onClick != null) Modifier.noIndicationClickable(onClick = onClick) else Modifier),
         color = CardBackground,
         shape = RoundedCornerShape(24.dp),
     ) {
@@ -808,7 +813,7 @@ private fun ChargeCurveCard(
     }
     Card(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp))
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+            .then(if (onClick != null) Modifier.noIndicationClickable(onClick = onClick) else Modifier),
         shape = RoundedCornerShape(28.dp),
         colors = CardDefaults.cardColors(containerColor = CardBackground),
     ) {
@@ -985,24 +990,29 @@ private fun PowerChart(
             val y1 = size.height - ((abs(first.powerW) / maxPower).toFloat() * size.height * 0.9f)
             val y2 = size.height - ((abs(second.powerW) / maxPower).toFloat() * size.height * 0.9f)
             val chargingSegment = (first.powerW + second.powerW) >= 0.0
-            val missingInterval = second.recordedAt - first.recordedAt > 120_000L
+            val missingInterval = second.recordedAt - first.recordedAt > MISSING_SAMPLE_INTERVAL_MS
+            val segmentColor = if (chargingSegment) ChargeGreen else DischargeRed
             drawLine(
-                color = (if (chargingSegment) ChargeGreen else DischargeRed).let {
-                    if (missingInterval) it.copy(alpha = 0.55f) else it
-                },
+                color = if (missingInterval) segmentColor.copy(alpha = 0.55f) else segmentColor,
                 start = Offset(x1, y1),
                 end = Offset(x2, y2),
                 strokeWidth = 3.dp.toPx(),
                 cap = StrokeCap.Round,
                 pathEffect = if (missingInterval) PathEffect.dashPathEffect(floatArrayOf(1.dp.toPx(), 7.dp.toPx())) else null,
             )
+            if (missingInterval) {
+                drawCircle(segmentColor, 2.5.dp.toPx(), Offset(x1, y1))
+                drawCircle(segmentColor, 2.5.dp.toPx(), Offset(x2, y2))
+            }
         }
         samples.zipWithNext().forEach { (first, second) ->
             val x1 = leftPadding + ((first.recordedAt - minTime).toFloat() / duration) * chartWidth
             val x2 = leftPadding + ((second.recordedAt - minTime).toFloat() / duration) * chartWidth
             val y1 = size.height - (((first.temperatureC - minTemp) / tempSpan).toFloat() * size.height)
             val y2 = size.height - (((second.temperatureC - minTemp) / tempSpan).toFloat() * size.height)
-            val missingInterval = second.recordedAt - first.recordedAt > 120_000L
+            val missingInterval = second.recordedAt - first.recordedAt > MISSING_SAMPLE_INTERVAL_MS
+            val firstColor = temperatureColor(first.temperatureC)
+            val secondColor = temperatureColor(second.temperatureC)
             drawLine(
                 color = temperatureColor((first.temperatureC + second.temperatureC) / 2.0).let {
                     if (missingInterval) it.copy(alpha = 0.55f) else it
@@ -1013,6 +1023,10 @@ private fun PowerChart(
                 cap = StrokeCap.Round,
                 pathEffect = if (missingInterval) PathEffect.dashPathEffect(floatArrayOf(1.dp.toPx(), 7.dp.toPx())) else null,
             )
+            if (missingInterval) {
+                drawCircle(firstColor, 2.5.dp.toPx(), Offset(x1, y1))
+                drawCircle(secondColor, 2.5.dp.toPx(), Offset(x2, y2))
+            }
         }
         selected?.let { point ->
             val x = leftPadding + ((point.recordedAt - minTime).toFloat() / duration) * chartWidth
@@ -1134,15 +1148,20 @@ private fun BatteryLevelCurveCard(samples: List<ChargeSample>) {
                         val x2 = left + ((second.recordedAt - minTime).toFloat() / duration) * width
                         val y1 = size.height - (first.level / 100f * size.height)
                         val y2 = size.height - (second.level / 100f * size.height)
-                        val missingInterval = second.recordedAt - first.recordedAt > 120_000L
+                        val missingInterval = second.recordedAt - first.recordedAt > MISSING_SAMPLE_INTERVAL_MS
+                        val segmentColor = Color(0xFF3978EB)
                         drawLine(
-                            color = Color(0xFF3978EB).let { if (missingInterval) it.copy(alpha = 0.55f) else it },
+                            color = if (missingInterval) segmentColor.copy(alpha = 0.55f) else segmentColor,
                             start = Offset(x1, y1),
                             end = Offset(x2, y2),
                             strokeWidth = 3.dp.toPx(),
                             cap = StrokeCap.Round,
                             pathEffect = if (missingInterval) PathEffect.dashPathEffect(floatArrayOf(1.dp.toPx(), 7.dp.toPx())) else null,
                         )
+                        if (missingInterval) {
+                            drawCircle(segmentColor, 2.5.dp.toPx(), Offset(x1, y1))
+                            drawCircle(segmentColor, 2.5.dp.toPx(), Offset(x2, y2))
+                        }
                     }
                     selected?.let { point ->
                         val x = left + ((point.recordedAt - minTime).toFloat() / duration) * width
@@ -1286,7 +1305,9 @@ private fun TemperatureHistoryChart(
             val x2 = left + ((second.recordedAt - minTime).toFloat() / duration) * width
             val y1 = size.height - (((first.temperatureC - minTemp) / span).toFloat() * size.height)
             val y2 = size.height - (((second.temperatureC - minTemp) / span).toFloat() * size.height)
-            val missingInterval = second.recordedAt - first.recordedAt > 120_000L
+            val missingInterval = second.recordedAt - first.recordedAt > MISSING_SAMPLE_INTERVAL_MS
+            val firstColor = temperatureColor(first.temperatureC)
+            val secondColor = temperatureColor(second.temperatureC)
             drawLine(
                 temperatureColor((first.temperatureC + second.temperatureC) / 2.0).let {
                     if (missingInterval) it.copy(alpha = 0.55f) else it
@@ -1297,6 +1318,10 @@ private fun TemperatureHistoryChart(
                 StrokeCap.Round,
                 pathEffect = if (missingInterval) PathEffect.dashPathEffect(floatArrayOf(1.dp.toPx(), 7.dp.toPx())) else null,
             )
+            if (missingInterval) {
+                drawCircle(firstColor, 2.5.dp.toPx(), Offset(x1, y1))
+                drawCircle(secondColor, 2.5.dp.toPx(), Offset(x2, y2))
+            }
         }
         selected?.let { point ->
             val x = left + ((point.recordedAt - minTime).toFloat() / duration) * width
@@ -1388,7 +1413,7 @@ private fun HistoryScreen(
 @Composable
 private fun UsagePeriodCard(period: UsagePeriod, onClick: () -> Unit) {
     Surface(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp)).clickable(onClick = onClick),
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp)).noIndicationClickable(onClick = onClick),
         shape = RoundedCornerShape(26.dp),
         color = CardBackground,
     ) {
@@ -1626,17 +1651,23 @@ private fun UsageLevelCurveCard(
                             first.isCharging || second.isCharging -> ChargeGreenDark
                             else -> DischargeRed
                         }
-                        val missingInterval = second.recordedAt - first.recordedAt > 120_000L
+                        val missingInterval = second.recordedAt - first.recordedAt > MISSING_SAMPLE_INTERVAL_MS
+                        val y1 = size.height * (1f - first.level / 100f)
+                        val y2 = size.height * (1f - second.level / 100f)
                         drawLine(
                             color = if (missingInterval) segmentColor.copy(alpha = 0.55f) else segmentColor,
-                            start = Offset(x1, size.height * (1f - first.level / 100f)),
-                            end = Offset(x2, size.height * (1f - second.level / 100f)),
+                            start = Offset(x1, y1),
+                            end = Offset(x2, y2),
                             strokeWidth = 3.dp.toPx(),
                             cap = StrokeCap.Round,
                             pathEffect = if (missingInterval) {
                                 PathEffect.dashPathEffect(floatArrayOf(1.dp.toPx(), 7.dp.toPx()))
                             } else null,
                         )
+                        if (missingInterval) {
+                            drawCircle(segmentColor, 2.5.dp.toPx(), Offset(x1, y1))
+                            drawCircle(segmentColor, 2.5.dp.toPx(), Offset(x2, y2))
+                        }
                     }
                     selected?.let { point ->
                         val x = left + ((point.recordedAt - samples.first().recordedAt).toFloat() / duration) * width
@@ -2048,7 +2079,7 @@ private fun DualCellModeChoice(
     modifier: Modifier = Modifier,
 ) {
     Surface(
-        modifier = modifier.clip(RoundedCornerShape(18.dp)).clickable(onClick = onClick),
+        modifier = modifier.clip(RoundedCornerShape(18.dp)).noIndicationClickable(onClick = onClick),
         color = if (selected) ChargeGreen.copy(alpha = 0.14f) else TrackColor.copy(alpha = 0.65f),
         shape = RoundedCornerShape(18.dp),
     ) {
@@ -2081,6 +2112,7 @@ private fun SettingsScreen(
     dualCellEnabled: Boolean,
     dualCellMode: DualCellMode,
     notificationEnabled: Boolean,
+    fluidCloudEnabled: Boolean,
     hideFromRecents: Boolean,
     currentDirectionInverted: Boolean,
     currentScaleExponent: Int,
@@ -2091,6 +2123,7 @@ private fun SettingsScreen(
     onDualCellChange: (Boolean) -> Unit,
     onDualCellModeChange: (DualCellMode) -> Unit,
     onNotificationEnabledChange: (Boolean) -> Unit,
+    onFluidCloudEnabledChange: (Boolean) -> Unit,
     onHideFromRecentsChange: (Boolean) -> Unit,
     onCurrentDirectionInvertedChange: (Boolean) -> Unit,
     onCurrentScaleExponentChange: (Int) -> Unit,
@@ -2100,6 +2133,31 @@ private fun SettingsScreen(
     val context = LocalContext.current
     val powerManager = context.getSystemService(PowerManager::class.java)
     val ignoresBatteryOptimization = powerManager.isIgnoringBatteryOptimizations(context.packageName)
+    val notificationManager = context.getSystemService(NotificationManager::class.java)
+    val fluidCloudRoute = remember { FluidCloudPublisher.detectRoute(context) }
+    var fluidCloudStatus by remember { mutableStateOf("") }
+    fun refreshFluidCloudStatus() {
+        fluidCloudStatus = context.getSharedPreferences(
+            FluidCloudPublisher.PREFERENCES,
+            android.content.Context.MODE_PRIVATE,
+        ).getString(FluidCloudPublisher.KEY_LAST_STATUS, "").orEmpty()
+    }
+    var promotedNotificationsAllowed by remember { mutableStateOf(false) }
+    fun refreshPromotedNotificationAccess() {
+        promotedNotificationsAllowed = Build.VERSION.SDK_INT >= 36 &&
+            notificationManager.canPostPromotedNotifications()
+    }
+    LaunchedEffect(Unit) {
+        refreshPromotedNotificationAccess()
+        while (true) {
+            refreshFluidCloudStatus()
+            kotlinx.coroutines.delay(1_000L)
+        }
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        refreshPromotedNotificationAccess()
+        refreshFluidCloudStatus()
+    }
     var sliderValue by remember(ratedMaxPowerW) { mutableStateOf(ratedMaxPowerW.toFloat()) }
     var capacityValue by remember(ratedCapacityMah) { mutableIntStateOf(ratedCapacityMah) }
     LazyColumn(
@@ -2143,6 +2201,7 @@ private fun SettingsScreen(
                 }
             }
         }
+
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -2151,7 +2210,7 @@ private fun SettingsScreen(
             ) {
                 Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().clickable {
+                        modifier = Modifier.fillMaxWidth().noIndicationClickable {
                             onCurrentDirectionInvertedChange(!currentDirectionInverted)
                         },
                         verticalAlignment = Alignment.CenterVertically,
@@ -2240,7 +2299,7 @@ private fun SettingsScreen(
             ) {
                 Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().clickable { onDualCellChange(!dualCellEnabled) },
+                        modifier = Modifier.fillMaxWidth().noIndicationClickable { onDualCellChange(!dualCellEnabled) },
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
@@ -2289,7 +2348,7 @@ private fun SettingsScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onNotificationEnabledChange(!notificationEnabled) }
+                        .noIndicationClickable { onNotificationEnabledChange(!notificationEnabled) }
                         .padding(horizontal = 18.dp, vertical = 16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -2327,7 +2386,7 @@ private fun SettingsScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onHideFromRecentsChange(!hideFromRecents) }
+                        .noIndicationClickable { onHideFromRecentsChange(!hideFromRecents) }
                         .padding(horizontal = 18.dp, vertical = 16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -2365,7 +2424,7 @@ private fun SettingsScreen(
         }
         item {
             Surface(
-                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).clickable {
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).noIndicationClickable {
                     val intent = Intent(
                         Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
                         Uri.parse("package:${context.packageName}"),
@@ -2398,7 +2457,7 @@ private fun SettingsScreen(
         }
         item {
             Surface(
-                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).clickable {
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).noIndicationClickable {
                     context.startActivity(
                         Intent(
                             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -2422,13 +2481,112 @@ private fun SettingsScreen(
         }
         item {
             Surface(
-                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).clickable {
-                    if (updateStatus.startsWith("发现新版本") && updateUrl != null) {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(updateUrl)))
-                    } else {
-                        onCheckForUpdates()
+                modifier = Modifier.fillMaxWidth(),
+                color = CardBackground,
+                shape = RoundedCornerShape(24.dp),
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(
+                                enabled = fluidCloudRoute != FluidCloudPublisher.Route.UNSUPPORTED,
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = { onFluidCloudEnabledChange(!fluidCloudEnabled) },
+                            ),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Rounded.Bolt,
+                            contentDescription = null,
+                            tint = if (fluidCloudEnabled && fluidCloudRoute != FluidCloudPublisher.Route.UNSUPPORTED) {
+                                ChargeGreenDark
+                            } else {
+                                TextSecondary
+                            },
+                        )
+                        Spacer(Modifier.size(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("充电流体云", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Text(
+                                when {
+                                    fluidCloudRoute == FluidCloudPublisher.Route.UNSUPPORTED -> "当前系统不支持流体云接口"
+                                    !fluidCloudEnabled -> "已关闭 · ${FluidCloudPublisher.routeLabel(context)}"
+                                    fluidCloudStatus.isNotBlank() -> fluidCloudStatus
+                                    else -> "已开启 · ${FluidCloudPublisher.routeLabel(context)}"
+                                },
+                                color = TextSecondary,
+                                fontSize = 12.sp,
+                            )
+                        }
+                        Switch(
+                            checked = fluidCloudEnabled && fluidCloudRoute != FluidCloudPublisher.Route.UNSUPPORTED,
+                            enabled = fluidCloudRoute != FluidCloudPublisher.Route.UNSUPPORTED,
+                            onCheckedChange = onFluidCloudEnabledChange,
+                        )
                     }
-                },
+                    if (Build.VERSION.SDK_INT >= 36) {
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                ) {
+                                    val intent = Intent("android.settings.MANAGE_APP_PROMOTED_NOTIFICATIONS").apply {
+                                        data = Uri.parse("package:${context.packageName}")
+                                    }
+                                    runCatching { context.startActivity(intent) }.onFailure {
+                                        context.startActivity(
+                                            Intent(
+                                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                                Uri.parse("package:${context.packageName}"),
+                                            ),
+                                        )
+                                    }
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                if (promotedNotificationsAllowed) {
+                                    "系统实时通知权限已允许"
+                                } else {
+                                    "点击允许系统实时通知权限"
+                                },
+                                color = if (promotedNotificationsAllowed) ChargeGreenDark else TextSecondary,
+                                fontSize = 12.sp,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(
+                                Icons.Rounded.ChevronRight,
+                                contentDescription = null,
+                                tint = TextSecondary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(24.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) {
+                        if (updateStatus.startsWith("发现新版本") && updateUrl != null) {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(updateUrl)))
+                        } else {
+                            onCheckForUpdates()
+                        }
+                    },
                 color = CardBackground,
                 shape = RoundedCornerShape(24.dp),
             ) {
@@ -2608,7 +2766,7 @@ private fun HealthScreen(
                     day.sessions.sortedByDescending { it.startedAt }.forEachIndexed { index, session ->
                         if (index > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(TrackColor))
                         Row(
-                            modifier = Modifier.fillMaxWidth().clickable { onSessionClick(session) }.padding(vertical = 12.dp),
+                            modifier = Modifier.fillMaxWidth().noIndicationClickable { onSessionClick(session) }.padding(vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
@@ -2637,7 +2795,7 @@ private fun HealthScreen(
 @Composable
 private fun SessionCard(session: ChargeSession, onClick: () -> Unit) {
     Surface(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp)).clickable(onClick = onClick),
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp)).noIndicationClickable(onClick = onClick),
         shape = RoundedCornerShape(26.dp),
         color = CardBackground,
     ) {
@@ -2834,7 +2992,19 @@ private fun BottomNavItem(
     }
 }
 
+@Composable
+private fun Modifier.noIndicationClickable(
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+): Modifier = clickable(
+    enabled = enabled,
+    interactionSource = remember { MutableInteractionSource() },
+    indication = null,
+    onClick = onClick,
+)
+
 private val dateFormatter = DateTimeFormatter.ofPattern("M月d日 HH:mm")
+private const val MISSING_SAMPLE_INTERVAL_MS = 2L * 60L * 1000L
 private val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 private val timeSecondsFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
 

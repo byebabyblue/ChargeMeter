@@ -8,6 +8,7 @@ import android.app.Service
 import android.app.AlarmManager
 import android.content.Intent
 import android.os.Build
+import android.os.Bundle
 import android.os.SystemClock
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -28,12 +29,14 @@ class BatteryMonitorService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var reader: BatteryReader
     private lateinit var appUsageReader: AppUsageReader
+    private lateinit var fluidCloudPublisher: FluidCloudPublisher
     private var monitorJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
         reader = BatteryReader(this)
         appUsageReader = AppUsageReader(applicationContext)
+        fluidCloudPublisher = FluidCloudPublisher(applicationContext)
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, batteryNotification(reader.read()))
     }
@@ -61,12 +64,14 @@ class BatteryMonitorService : Service() {
                 )
                 getSystemService(NotificationManager::class.java)
                     .notify(NOTIFICATION_ID, batteryNotification(disconnected))
+                fluidCloudPublisher.publish(disconnected)
             }
         }
         if (monitorJob?.isActive != true) {
             monitorJob = scope.launch {
                 val repository = (application as ChargeMeterApplication).repository
                 var lastRecordedAt = 0L
+                var lastFluidCloudAt = 0L
                 while (isActive) {
                     val reading = reader.read()
                     getSystemService(NotificationManager::class.java)
@@ -77,6 +82,10 @@ class BatteryMonitorService : Service() {
                             repository.recordForegroundPower(appUsageReader.currentForegroundPackage(), reading)
                         }
                         lastRecordedAt = reading.timestamp
+                    }
+                    if (reading.timestamp - lastFluidCloudAt >= FLUID_CLOUD_INTERVAL_MS) {
+                        fluidCloudPublisher.publish(reading)
+                        lastFluidCloudAt = reading.timestamp
                     }
                     delay(POLL_INTERVAL_MS)
                 }
@@ -124,11 +133,17 @@ class BatteryMonitorService : Service() {
         ).apply {
             description = "持续记录本次充电的功率与电池状态"
             setShowBadge(false)
+            setSound(null, null)
+            enableVibration(false)
         }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
-    private fun notification(title: String, text: String): Notification {
+    private fun notification(
+        title: String,
+        text: String,
+        reading: com.local.chargemeter.data.BatteryReading,
+    ): Notification {
         val openIntent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -136,6 +151,33 @@ class BatteryMonitorService : Service() {
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val requestFluidCloud = Build.VERSION.SDK_INT >= 36 &&
+            fluidCloudEnabled() && reading.isPowerConnected
+        if (requestFluidCloud) {
+            return Notification.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setSubText("充电信息")
+                .setContentIntent(pendingIntent)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
+                .setCategory(Notification.CATEGORY_STATUS)
+                .setProgress(100, reading.level.coerceIn(0, 100), false)
+                .setStyle(
+                    Notification.ProgressStyle()
+                        .setStyledByProgress(false)
+                        .setProgress(reading.level.coerceIn(0, 100)),
+                )
+                .setShortCriticalText(
+                    String.format(Locale.getDefault(), "%.1fW", kotlin.math.abs(reading.powerW)),
+                )
+                .addExtras(Bundle().apply {
+                    putBoolean("android.requestPromotedOngoing", true)
+                })
+                .build()
+        }
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
@@ -164,12 +206,16 @@ class BatteryMonitorService : Service() {
             kotlin.math.abs(reading.currentA),
             reading.temperatureC,
         )
-        return notification(title, text)
+        return notification(title, text, reading)
     }
 
     private fun monitorEnabled(): Boolean =
         getSharedPreferences("charge_settings", MODE_PRIVATE)
             .getBoolean("monitor_notification_enabled", true)
+
+    private fun fluidCloudEnabled(): Boolean =
+        getSharedPreferences("charge_settings", MODE_PRIVATE)
+            .getBoolean("fluid_cloud_enabled", true)
 
     private fun restartPendingIntent(): PendingIntent = PendingIntent.getBroadcast(
         this,
@@ -205,5 +251,6 @@ class BatteryMonitorService : Service() {
         private const val WATCHDOG_INTERVAL_MS = 10L * 60L * 1000L
         private const val POLL_INTERVAL_MS = 5_000L
         private const val SAMPLE_INTERVAL_MS = 30_000L
+        private const val FLUID_CLOUD_INTERVAL_MS = 30_000L
     }
 }
