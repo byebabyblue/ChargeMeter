@@ -205,6 +205,8 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
     val currentScaleExponent by viewModel.currentScaleExponent.collectAsStateWithLifecycle()
     val updateStatus by viewModel.updateStatus.collectAsStateWithLifecycle()
     val updateUrl by viewModel.updateUrl.collectAsStateWithLifecycle()
+    val updateUi by viewModel.updateUi.collectAsStateWithLifecycle()
+    val autoCheckUpdates by viewModel.autoCheckUpdates.collectAsStateWithLifecycle()
     val temperatureSamples by viewModel.temperatureSamples.collectAsStateWithLifecycle()
     val appPowerAverages by viewModel.appPowerAverages.collectAsStateWithLifecycle()
     val appPowerSamples by viewModel.appPowerSamples.collectAsStateWithLifecycle()
@@ -248,6 +250,8 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
             outline = palette.TextSecondary,
         ),
     ) {
+        UpdateDialog(updateUi, viewModel::dismissUpdate, viewModel::checkForUpdates,
+            viewModel::downloadUpdate, viewModel::installUpdate)
         Box(modifier = Modifier.fillMaxSize().background(PageBackground)) {
             Box(modifier = Modifier.fillMaxSize().hazeSource(hazeState)) {
                 AnimatedContent(
@@ -345,6 +349,8 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
                     currentScaleExponent = currentScaleExponent,
                     updateStatus = updateStatus,
                     updateUrl = updateUrl,
+                    autoCheckUpdates = autoCheckUpdates,
+                    onAutoCheckUpdatesChange = viewModel::setAutoCheckUpdates,
                     onRatedPowerChange = viewModel::setRatedMaxPower,
                     onRatedCapacityChange = viewModel::setRatedCapacity,
                     onDualCellChange = viewModel::setDualCellEnabled,
@@ -719,8 +725,8 @@ private fun PowerGauge(powerW: Double, charging: Boolean, ratedMaxPowerW: Double
             )
             drawCircle(
                 brush = Brush.radialGradient(
-                    0f to Color(0xFF71917B).copy(alpha = 0.10f),
-                    0.75f to Color(0xFF71917B).copy(alpha = 0.10f),
+                    0f to (if (charging) Color(0xFF71917B) else Color(0xFF95787D)).copy(alpha = 0.10f),
+                    0.75f to (if (charging) Color(0xFF71917B) else Color(0xFF95787D)).copy(alpha = 0.10f),
                     1f to Color.Transparent,
                     center = shadowCenter,
                     radius = outerRadius + 17.dp.toPx(),
@@ -732,9 +738,9 @@ private fun PowerGauge(powerW: Double, charging: Boolean, ratedMaxPowerW: Double
             // A broad pale tube with an even, concentric inset around the inner disc.
             drawCircle(
                 brush = Brush.radialGradient(
-                    0f to if (palette.isDark) Color(0xFF26382C) else Color(0xFFFFFFFF),
-                    0.76f to if (palette.isDark) Color(0xFF26382C) else Color(0xFFFFFFFF),
-                    1f to if (palette.isDark) Color(0xFF18251D) else Color(0xFFEDF0EE),
+                    0f to if (palette.isDark) (if (charging) Color(0xFF26382C) else Color(0xFF38282E)) else Color(0xFFFFFFFF),
+                    0.76f to if (palette.isDark) (if (charging) Color(0xFF26382C) else Color(0xFF38282E)) else Color(0xFFFFFFFF),
+                    1f to if (palette.isDark) (if (charging) Color(0xFF18251D) else Color(0xFF261C21)) else Color(0xFFEDF0EE),
                     center = center,
                     radius = outerRadius,
                 ),
@@ -742,8 +748,8 @@ private fun PowerGauge(powerW: Double, charging: Boolean, ratedMaxPowerW: Double
             )
             drawCircle(
                 brush = Brush.radialGradient(
-                    0f to Color(0xFF739078).copy(alpha = 0.19f),
-                    0.78f to Color(0xFF739078).copy(alpha = 0.19f),
+                    0f to (if (charging) Color(0xFF739078) else Color(0xFF967780)).copy(alpha = 0.19f),
+                    0.78f to (if (charging) Color(0xFF739078) else Color(0xFF967780)).copy(alpha = 0.19f),
                     1f to Color.Transparent,
                     center = shadowCenter,
                     radius = innerRadius + 14.dp.toPx(),
@@ -753,9 +759,9 @@ private fun PowerGauge(powerW: Double, charging: Boolean, ratedMaxPowerW: Double
             )
             drawCircle(
                 brush = Brush.radialGradient(
-                    0f to if (palette.isDark) Color(0xFF152019) else Color(0xFFF7FAF6),
-                    0.82f to if (palette.isDark) Color(0xFF152019) else Color(0xFFF7FAF6),
-                    1f to if (palette.isDark) Color(0xFF1B2920) else Color(0xFFFCFDFC),
+                    0f to if (palette.isDark) (if (charging) Color(0xFF152019) else Color(0xFF21181D)) else Color(0xFFF7FAF6),
+                    0.82f to if (palette.isDark) (if (charging) Color(0xFF152019) else Color(0xFF21181D)) else Color(0xFFF7FAF6),
+                    1f to if (palette.isDark) (if (charging) Color(0xFF1B2920) else Color(0xFF2A1E24)) else Color(0xFFFCFDFC),
                     center = center,
                     radius = innerRadius,
                 ),
@@ -2283,6 +2289,8 @@ private fun SettingsScreen(
     currentScaleExponent: Int,
     updateStatus: String,
     updateUrl: String?,
+    autoCheckUpdates: Boolean,
+    onAutoCheckUpdatesChange: (Boolean) -> Unit,
     onRatedPowerChange: (Double) -> Unit,
     onRatedCapacityChange: (Int) -> Unit,
     onDualCellChange: (Boolean) -> Unit,
@@ -2343,8 +2351,9 @@ private fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         item {
-            PageHeader("设置", "充电规格、采样与应用选项", onBack)
+            PageHeader("设置", "外观、后台记录与应用更新", onBack)
         }
+
         item {
             Surface(color = CardBackground, shape = RoundedCornerShape(28.dp)) {
                 Column(Modifier.fillMaxWidth().padding(20.dp)) {
@@ -2371,172 +2380,12 @@ private fun SettingsScreen(
                 }
             }
         }
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(28.dp),
-                color = CardBackground,
-            ) {
-                Column(modifier = Modifier.padding(22.dp)) {
-                    Text("厂商标称最大功率", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                    Text(
-                        "${sliderValue.roundToInt()} W",
-                        color = ChargeGreenDark,
-                        fontSize = 44.sp,
-                        fontWeight = FontWeight.Black,
-                    )
-                    PowerBandSelector(
-                        value = sliderValue.roundToInt(),
-                        onValueChange = {
-                            sliderValue = it.toFloat()
-                            onRatedPowerChange(it.toDouble())
-                        },
-                    )
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("10 W", color = TextSecondary, fontSize = 12.sp)
-                        Text("300 W", color = TextSecondary, fontSize = 12.sp)
-                    }
-                }
-            }
-        }
 
         item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = CardBackground,
-                shape = RoundedCornerShape(24.dp),
-            ) {
-                Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().noIndicationClickable {
-                            onCurrentDirectionInvertedChange(!currentDirectionInverted)
-                        },
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("电流方向取反", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                            Text(
-                                if (currentDirectionInverted) "已开启 · 交换充电与放电方向" else "已关闭 · 使用自动识别方向",
-                                color = TextSecondary,
-                                fontSize = 12.sp,
-                            )
-                        }
-                        Switch(
-                            checked = currentDirectionInverted,
-                            onCheckedChange = onCurrentDirectionInvertedChange,
-                        )
-                    }
-                    Spacer(Modifier.height(18.dp))
-                    Text("电流单位倍率", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Text(
-                        "${currentScalePowerLabel(currentScaleExponent)}  ·  ${currentScaleLabel(currentScaleExponent)}",
-                        color = ChargeGreenDark,
-                        fontSize = 34.sp,
-                        fontWeight = FontWeight.Black,
-                    )
-                    Text(
-                        "用于校正部分系统返回的电流单位，默认 ×1",
-                        color = TextSecondary,
-                        fontSize = 12.sp,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    PowerBandSelector(
-                        value = currentScaleExponent,
-                        onValueChange = onCurrentScaleExponentChange,
-                        minValue = -6,
-                        maxValue = 6,
-                        step = 1,
-                        majorEvery = 1,
-                        pixelsPerStep = 46f,
-                        labelFormatter = ::currentScalePowerLabel,
-                    )
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("10⁻⁶ · 0.000001×", color = TextSecondary, fontSize = 12.sp)
-                        Text("10⁶ · 1,000,000×", color = TextSecondary, fontSize = 12.sp)
-                    }
-                }
-            }
+            Text("通知与显示", color = TextSecondary, fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
         }
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(28.dp),
-                color = CardBackground,
-            ) {
-                Column(modifier = Modifier.padding(22.dp)) {
-                    Text("厂商标称电池容量", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                    Text(
-                        "$capacityValue mAh",
-                        color = ChargeGreenDark,
-                        fontSize = 42.sp,
-                        fontWeight = FontWeight.Black,
-                    )
-                    PowerBandSelector(
-                        value = capacityValue,
-                        onValueChange = {
-                            capacityValue = it
-                            onRatedCapacityChange(it)
-                        },
-                        minValue = 1_000,
-                        maxValue = 20_000,
-                        step = 100,
-                        majorEvery = 1_000,
-                    )
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("1000 mAh", color = TextSecondary, fontSize = 12.sp)
-                        Text("20000 mAh", color = TextSecondary, fontSize = 12.sp)
-                    }
-                }
-            }
-        }
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = CardBackground,
-                shape = RoundedCornerShape(24.dp),
-            ) {
-                Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().noIndicationClickable { onDualCellChange(!dualCellEnabled) },
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("双电芯整包换算", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                            Text(
-                                when {
-                                    !dualCellEnabled -> "已关闭 · 按系统原始值显示"
-                                    dualCellMode == DualCellMode.Voltage -> "已开启 · 电压按 ×2 显示"
-                                    else -> "已开启 · 电流按 ×2 显示"
-                                },
-                                color = TextSecondary,
-                                fontSize = 12.sp,
-                            )
-                            Text("两种方式的总功率均按 ×2 计算", color = TextSecondary, fontSize = 11.sp)
-                        }
-                        Switch(checked = dualCellEnabled, onCheckedChange = onDualCellChange)
-                    }
-                    if (dualCellEnabled) {
-                        Spacer(Modifier.height(14.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            DualCellModeChoice(
-                                label = "电压 ×2",
-                                icon = Icons.Rounded.ElectricMeter,
-                                selected = dualCellMode == DualCellMode.Voltage,
-                                onClick = { onDualCellModeChange(DualCellMode.Voltage) },
-                                modifier = Modifier.weight(1f),
-                            )
-                            DualCellModeChoice(
-                                label = "电流 ×2",
-                                icon = Icons.Rounded.Speed,
-                                selected = dualCellMode == DualCellMode.Current,
-                                onClick = { onDualCellModeChange(DualCellMode.Current) },
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                    }
-                }
-            }
-        }
+
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -2575,108 +2424,7 @@ private fun SettingsScreen(
                 }
             }
         }
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = CardBackground,
-                shape = RoundedCornerShape(24.dp),
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .noIndicationClickable { onHideFromRecentsChange(!hideFromRecents) }
-                        .padding(horizontal = 18.dp, vertical = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("隐藏最近任务卡片", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        Text(
-                            if (hideFromRecents) {
-                                "已开启 · 离开应用后不在最近任务中显示"
-                            } else {
-                                "已关闭 · 在最近任务中保留应用卡片"
-                            },
-                            color = TextSecondary,
-                            fontSize = 12.sp,
-                        )
-                    }
-                    Switch(
-                        checked = hideFromRecents,
-                        onCheckedChange = onHideFromRecentsChange,
-                    )
-                }
-            }
-        }
-        item {
-            Surface(color = TrackColor.copy(alpha = 0.65f), shape = RoundedCornerShape(22.dp)) {
-                Column(modifier = Modifier.padding(18.dp)) {
-                    Text("当前设备：${Build.MODEL}", fontWeight = FontWeight.Bold)
-                    Text(
-                        "Android 没有统一接口提供包装或充电器上标注的最大功率。当前机型默认使用 100 W，你可以按充电器铭牌修改。这个数值只决定仪表满圈范围，实时功率仍来自电池数据。",
-                        color = TextSecondary,
-                        fontSize = 13.sp,
-                        lineHeight = 20.sp,
-                    )
-                }
-            }
-        }
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).noIndicationClickable {
-                    val intent = Intent(
-                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                        Uri.parse("package:${context.packageName}"),
-                    )
-                    runCatching { context.startActivity(intent) }.onFailure {
-                        context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-                    }
-                },
-                color = if (ignoresBatteryOptimization) ChargeGreen.copy(alpha = 0.11f) else CardBackground,
-                shape = RoundedCornerShape(24.dp),
-            ) {
-                Row(modifier = Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Rounded.BatteryChargingFull,
-                        contentDescription = null,
-                        tint = if (ignoresBatteryOptimization) ChargeGreenDark else TextPrimary,
-                    )
-                    Spacer(Modifier.size(14.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("后台持续记录", fontWeight = FontWeight.Bold)
-                        Text(
-                            if (ignoresBatteryOptimization) "已允许忽略电池优化" else "点击允许忽略电池优化",
-                            color = TextSecondary,
-                            fontSize = 12.sp,
-                        )
-                    }
-                    Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = TextSecondary)
-                }
-            }
-        }
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).noIndicationClickable {
-                    context.startActivity(
-                        Intent(
-                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                            Uri.parse("package:${context.packageName}"),
-                        ),
-                    )
-                },
-                color = CardBackground,
-                shape = RoundedCornerShape(24.dp),
-            ) {
-                Row(modifier = Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Rounded.Settings, contentDescription = null, tint = TextPrimary)
-                    Spacer(Modifier.size(14.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("ColorOS 后台权限", fontWeight = FontWeight.Bold)
-                        Text("在应用详情中允许后台活动与自启动", color = TextSecondary, fontSize = 12.sp)
-                    }
-                    Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = TextSecondary)
-                }
-            }
-        }
+
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -2770,6 +2518,316 @@ private fun SettingsScreen(
                 }
             }
         }
+
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = CardBackground,
+                shape = RoundedCornerShape(24.dp),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .noIndicationClickable { onHideFromRecentsChange(!hideFromRecents) }
+                        .padding(horizontal = 18.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("隐藏最近任务卡片", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text(
+                            if (hideFromRecents) {
+                                "已开启 · 离开应用后不在最近任务中显示"
+                            } else {
+                                "已关闭 · 在最近任务中保留应用卡片"
+                            },
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    Switch(
+                        checked = hideFromRecents,
+                        onCheckedChange = onHideFromRecentsChange,
+                    )
+                }
+            }
+        }
+
+        item {
+            Text("后台记录", color = TextSecondary, fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
+        }
+
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).noIndicationClickable {
+                    val intent = Intent(
+                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:${context.packageName}"),
+                    )
+                    runCatching { context.startActivity(intent) }.onFailure {
+                        context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                    }
+                },
+                color = if (ignoresBatteryOptimization) ChargeGreen.copy(alpha = 0.11f) else CardBackground,
+                shape = RoundedCornerShape(24.dp),
+            ) {
+                Row(modifier = Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Rounded.BatteryChargingFull,
+                        contentDescription = null,
+                        tint = if (ignoresBatteryOptimization) ChargeGreenDark else TextPrimary,
+                    )
+                    Spacer(Modifier.size(14.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("后台持续记录", fontWeight = FontWeight.Bold)
+                        Text(
+                            if (ignoresBatteryOptimization) "已允许忽略电池优化" else "点击允许忽略电池优化",
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = TextSecondary)
+                }
+            }
+        }
+
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).noIndicationClickable {
+                    context.startActivity(
+                        Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.parse("package:${context.packageName}"),
+                        ),
+                    )
+                },
+                color = CardBackground,
+                shape = RoundedCornerShape(24.dp),
+            ) {
+                Row(modifier = Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.Settings, contentDescription = null, tint = TextPrimary)
+                    Spacer(Modifier.size(14.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("ColorOS 后台权限", fontWeight = FontWeight.Bold)
+                        Text("在应用详情中允许后台活动与自启动", color = TextSecondary, fontSize = 12.sp)
+                    }
+                    Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = TextSecondary)
+                }
+            }
+        }
+
+        item {
+            Text("充电规格", color = TextSecondary, fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
+        }
+
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(28.dp),
+                color = CardBackground,
+            ) {
+                Column(modifier = Modifier.padding(22.dp)) {
+                    Text("厂商标称最大功率", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text(
+                        "${sliderValue.roundToInt()} W",
+                        color = ChargeGreenDark,
+                        fontSize = 44.sp,
+                        fontWeight = FontWeight.Black,
+                    )
+                    PowerBandSelector(
+                        value = sliderValue.roundToInt(),
+                        onValueChange = {
+                            sliderValue = it.toFloat()
+                            onRatedPowerChange(it.toDouble())
+                        },
+                    )
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("10 W", color = TextSecondary, fontSize = 12.sp)
+                        Text("300 W", color = TextSecondary, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(28.dp),
+                color = CardBackground,
+            ) {
+                Column(modifier = Modifier.padding(22.dp)) {
+                    Text("厂商标称电池容量", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text(
+                        "$capacityValue mAh",
+                        color = ChargeGreenDark,
+                        fontSize = 42.sp,
+                        fontWeight = FontWeight.Black,
+                    )
+                    PowerBandSelector(
+                        value = capacityValue,
+                        onValueChange = {
+                            capacityValue = it
+                            onRatedCapacityChange(it)
+                        },
+                        minValue = 1_000,
+                        maxValue = 20_000,
+                        step = 100,
+                        majorEvery = 1_000,
+                    )
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("1000 mAh", color = TextSecondary, fontSize = 12.sp)
+                        Text("20000 mAh", color = TextSecondary, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = CardBackground,
+                shape = RoundedCornerShape(24.dp),
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().noIndicationClickable { onDualCellChange(!dualCellEnabled) },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("双电芯整包换算", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Text(
+                                when {
+                                    !dualCellEnabled -> "已关闭 · 按系统原始值显示"
+                                    dualCellMode == DualCellMode.Voltage -> "已开启 · 电压按 ×2 显示"
+                                    else -> "已开启 · 电流按 ×2 显示"
+                                },
+                                color = TextSecondary,
+                                fontSize = 12.sp,
+                            )
+                            Text("两种方式的总功率均按 ×2 计算", color = TextSecondary, fontSize = 11.sp)
+                        }
+                        Switch(checked = dualCellEnabled, onCheckedChange = onDualCellChange)
+                    }
+                    if (dualCellEnabled) {
+                        Spacer(Modifier.height(14.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            DualCellModeChoice(
+                                label = "电压 ×2",
+                                icon = Icons.Rounded.ElectricMeter,
+                                selected = dualCellMode == DualCellMode.Voltage,
+                                onClick = { onDualCellModeChange(DualCellMode.Voltage) },
+                                modifier = Modifier.weight(1f),
+                            )
+                            DualCellModeChoice(
+                                label = "电流 ×2",
+                                icon = Icons.Rounded.Speed,
+                                selected = dualCellMode == DualCellMode.Current,
+                                onClick = { onDualCellModeChange(DualCellMode.Current) },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Text("电量计校准", color = TextSecondary, fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
+        }
+
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = CardBackground,
+                shape = RoundedCornerShape(24.dp),
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().noIndicationClickable {
+                            onCurrentDirectionInvertedChange(!currentDirectionInverted)
+                        },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("电流方向取反", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Text(
+                                if (currentDirectionInverted) "已开启 · 交换充电与放电方向" else "已关闭 · 使用自动识别方向",
+                                color = TextSecondary,
+                                fontSize = 12.sp,
+                            )
+                        }
+                        Switch(
+                            checked = currentDirectionInverted,
+                            onCheckedChange = onCurrentDirectionInvertedChange,
+                        )
+                    }
+                    Spacer(Modifier.height(18.dp))
+                    Text("电流单位倍率", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text(
+                        "${currentScalePowerLabel(currentScaleExponent)}  ·  ${currentScaleLabel(currentScaleExponent)}",
+                        color = ChargeGreenDark,
+                        fontSize = 34.sp,
+                        fontWeight = FontWeight.Black,
+                    )
+                    Text(
+                        "用于校正部分系统返回的电流单位，默认 ×1",
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    PowerBandSelector(
+                        value = currentScaleExponent,
+                        onValueChange = onCurrentScaleExponentChange,
+                        minValue = -6,
+                        maxValue = 6,
+                        step = 1,
+                        majorEvery = 1,
+                        pixelsPerStep = 46f,
+                        labelFormatter = ::currentScalePowerLabel,
+                    )
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("10⁻⁶ · 0.000001×", color = TextSecondary, fontSize = 12.sp)
+                        Text("10⁶ · 1,000,000×", color = TextSecondary, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+
+        item {
+            Surface(color = TrackColor.copy(alpha = 0.65f), shape = RoundedCornerShape(22.dp)) {
+                Column(modifier = Modifier.padding(18.dp)) {
+                    Text("当前设备：${Build.MODEL}", fontWeight = FontWeight.Bold)
+                    Text(
+                        "按充电器铭牌设置标称功率，决定仪表满圈范围。容量用于电池健康度估算。若系统电流显示异常，可调整电量计校准选项。",
+                        color = TextSecondary,
+                        fontSize = 13.sp,
+                        lineHeight = 20.sp,
+                    )
+                }
+            }
+        }
+
+        item {
+            Text("应用更新", color = TextSecondary, fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
+        }
+
+        item {
+            Surface(color = CardBackground, shape = RoundedCornerShape(24.dp)) {
+                Row(Modifier.fillMaxWidth().noIndicationClickable { onAutoCheckUpdatesChange(!autoCheckUpdates) }
+                    .padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("自动检查更新", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text(if (autoCheckUpdates) "启动时检查，有新版时提醒" else "已关闭 · 仅手动检查",
+                            color = TextSecondary, fontSize = 12.sp)
+                    }
+                    Switch(checked = autoCheckUpdates, onCheckedChange = onAutoCheckUpdatesChange)
+                }
+            }
+        }
+
         item {
             Surface(
                 modifier = Modifier
@@ -2779,11 +2837,7 @@ private fun SettingsScreen(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                     ) {
-                        if (updateStatus.startsWith("发现新版本") && updateUrl != null) {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(updateUrl)))
-                        } else {
-                            onCheckForUpdates()
-                        }
+                        onCheckForUpdates()
                     },
                 color = CardBackground,
                 shape = RoundedCornerShape(24.dp),
@@ -2799,6 +2853,7 @@ private fun SettingsScreen(
                 }
             }
         }
+
         item { BuildCreditCard(onOpenBuildCredits) }
     }
 }

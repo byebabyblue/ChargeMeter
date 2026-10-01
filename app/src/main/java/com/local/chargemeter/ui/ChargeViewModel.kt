@@ -94,6 +94,35 @@ class ChargeViewModel(application: Application) : AndroidViewModel(application) 
     val updateStatus: StateFlow<String> = _updateStatus
     private val _updateUrl = MutableStateFlow<String?>(null)
     val updateUrl: StateFlow<String?> = _updateUrl
+    private val updater = AppUpdater(application)
+    private val _updateUi = MutableStateFlow(UpdateUiState(release = updater.cached()))
+    internal val updateUi: StateFlow<UpdateUiState> = _updateUi
+    private val _autoCheckUpdates = MutableStateFlow(preferences.getBoolean("auto_check_updates", false))
+    val autoCheckUpdates: StateFlow<Boolean> = _autoCheckUpdates
+
+    fun setAutoCheckUpdates(enabled: Boolean) {
+        _autoCheckUpdates.value = enabled
+        preferences.edit().putBoolean("auto_check_updates", enabled).apply()
+    }
+
+    fun dismissUpdate() { _updateUi.value = _updateUi.value.copy(visible = false) }
+
+    fun downloadUpdate() {
+        val release = _updateUi.value.release ?: return
+        if (_updateUi.value.downloading || !release.newer) return
+        runCatching { updater.download(release) }
+            .onSuccess { _updateUi.value = _updateUi.value.copy(downloading = true, message = "下载已加入系统队列") }
+            .onFailure { _updateUi.value = _updateUi.value.copy(message = "无法启动下载，请重试") }
+    }
+
+    fun installUpdate() {
+        val release = _updateUi.value.release ?: return
+        viewModelScope.launch {
+            runCatching { updater.install(release) }.onSuccess { started ->
+                if (!started) _updateUi.value = _updateUi.value.copy(message = "允许安装此来源的应用后，返回并点击直接安装")
+            }.onFailure { _updateUi.value = _updateUi.value.copy(message = "无法安装，请检查安装包或系统权限") }
+        }
+    }
 
     val sessions: StateFlow<List<ChargeSession>> = repository.sessions.stateIn(
         viewModelScope,
@@ -129,6 +158,18 @@ class ChargeViewModel(application: Application) : AndroidViewModel(application) 
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     init {
+        if (_autoCheckUpdates.value) checkUpdate(showAlways = false)
+        viewModelScope.launch {
+            while (isActive) {
+                val before = _updateUi.value
+                if (before.release != null && !before.checking) {
+                    runCatching { updater.status(before) }.onSuccess {
+                        _updateUi.value = it.copy(visible = _updateUi.value.visible)
+                    }
+                }
+                delay(1_000)
+            }
+        }
         viewModelScope.launch {
             while (isActive) {
                 _reading.value = reader.read()
@@ -210,46 +251,28 @@ class ChargeViewModel(application: Application) : AndroidViewModel(application) 
         _reading.value = reader.read()
     }
 
-    fun checkForUpdates() {
-        _updateStatus.value = "正在检查更新…"
-        viewModelScope.launch(Dispatchers.IO) {
-            val result = runCatching {
-                val connection = (URL(LATEST_RELEASE_API).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 8_000
-                    readTimeout = 8_000
-                    setRequestProperty("Accept", "application/vnd.github+json")
-                    setRequestProperty("User-Agent", "ChargeMeter/${BuildConfig.VERSION_NAME}")
-                }
-                val body = connection.inputStream.bufferedReader().use { it.readText() }
-                val tag = Regex("\\\"tag_name\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"").find(body)?.groupValues?.get(1)
-                    ?: error("没有找到版本号")
-                val url = Regex("\\\"html_url\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"").find(body)?.groupValues?.get(1)
-                    ?: RELEASES_URL
-                tag.removePrefix("v") to url
-            }
-            withContext(Dispatchers.Main) {
-                result.onSuccess { (latest, url) ->
-                    _updateUrl.value = url
-                    _updateStatus.value = if (isNewerVersion(latest, BuildConfig.VERSION_NAME)) {
-                        "发现新版本 $latest · 点击查看"
-                    } else {
-                        "已是最新版本 ${BuildConfig.VERSION_NAME}"
-                    }
-                }.onFailure {
-                    _updateStatus.value = "检查失败 · 点击重试"
-                }
-            }
-        }
-    }
+    fun checkForUpdates() = checkUpdate(showAlways = true)
 
-    private fun isNewerVersion(latest: String, current: String): Boolean {
-        val left = latest.split('.').map { it.toIntOrNull() ?: 0 }
-        val right = current.split('.').map { it.toIntOrNull() ?: 0 }
-        repeat(maxOf(left.size, right.size)) { index ->
-            val comparison = (left.getOrNull(index) ?: 0).compareTo(right.getOrNull(index) ?: 0)
-            if (comparison != 0) return comparison > 0
+    private fun checkUpdate(showAlways: Boolean) {
+        if (_updateUi.value.checking) {
+            _updateUi.value = _updateUi.value.copy(visible = true)
+            return
         }
-        return false
+        _updateStatus.value = "正在检查更新…"
+        _updateUi.value = _updateUi.value.copy(visible = showAlways, checking = true, message = "")
+        viewModelScope.launch {
+            runCatching { updater.latest() }.onSuccess { release ->
+                _updateUrl.value = release.pageUrl
+                _updateStatus.value = if (release.newer) "发现新版本 ${release.version}" else "已是最新版本 ${BuildConfig.VERSION_NAME}"
+                val initial = _updateUi.value.copy(checking = false, release = release,
+                    message = if (release.newer) "有新版本可用" else "当前已是最新版本",
+                    ready = false, downloading = false, progress = 0)
+                _updateUi.value = updater.status(initial).copy(visible = _updateUi.value.visible || (!showAlways && release.newer))
+            }.onFailure {
+                _updateStatus.value = "检查失败 · 点击重试"
+                _updateUi.value = _updateUi.value.copy(checking = false, message = "暂时无法连接 GitHub，请检查网络后重试")
+            }
+        }
     }
 
     private fun defaultRatedPower(): Double = when (Build.MODEL.uppercase()) {
