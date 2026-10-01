@@ -19,6 +19,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -74,7 +75,11 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -94,6 +99,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -137,27 +143,23 @@ import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.exp
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 private val ChargeGreen = Color(0xFF12D85A)
-private val ChargeGreenDark = Color(0xFF00A943)
 private val DischargeRed = Color(0xFFFF4F55)
-private val DischargeRedDark = Color(0xFFD92D38)
-private val PageBackground = Color(0xFFF5F8F3)
-private val CardBackground = Color(0xFFFFFFFF)
-private val TextPrimary = Color(0xFF101411)
-private val TextSecondary = Color(0xFF727873)
-private val TrackColor = Color(0xFFE4EAE4)
 
-private enum class Screen { Home, History, Detail, Health, Settings, AppUsage, LevelHistory, TemperatureHistory, UsageDetail }
+private enum class Screen { Home, History, Detail, Health, Settings, BuildCredits, AppUsage, LevelHistory, TemperatureHistory, UsageDetail }
 
 private data class UsagePeriod(
     val startAt: Long,
     val endAt: Long,
     val startLevel: Int,
     val endLevel: Int,
+    val sourceSessionId: Long = 0L,
 )
 
 private sealed interface HistoryEntry {
@@ -168,6 +170,25 @@ private sealed interface HistoryEntry {
 
 @Composable
 fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
+    val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
+    val isDark = when (themeMode) {
+        ThemeMode.System -> isSystemInDarkTheme()
+        ThemeMode.Light -> false
+        ThemeMode.Dark -> true
+    }
+    val palette = if (isDark) DarkPalette else LightPalette
+    val PageBackground = palette.PageBackground
+    val CardBackground = palette.CardBackground
+    val TextPrimary = palette.TextPrimary
+    val context = LocalContext.current
+    SideEffect {
+        (context as? android.app.Activity)?.window?.let { window ->
+            androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).apply {
+                isAppearanceLightStatusBars = !isDark
+                isAppearanceLightNavigationBars = !isDark
+            }
+        }
+    }
     val reading by viewModel.reading.collectAsStateWithLifecycle()
     val sessions by viewModel.sessions.collectAsStateWithLifecycle()
     val recentSamples by viewModel.recentSamples.collectAsStateWithLifecycle()
@@ -188,6 +209,7 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
     val appPowerAverages by viewModel.appPowerAverages.collectAsStateWithLifecycle()
     val appPowerSamples by viewModel.appPowerSamples.collectAsStateWithLifecycle()
     val hazeState = rememberHazeState()
+    val settingsListState = androidx.compose.foundation.lazy.rememberLazyListState()
     var screen by remember { mutableStateOf(Screen.Home) }
     var detailReturnScreen by remember { mutableStateOf(Screen.Home) }
     var selectedUsagePeriod by remember { mutableStateOf<UsagePeriod?>(null) }
@@ -197,17 +219,33 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
             Screen.Detail -> detailReturnScreen
             Screen.History, Screen.Health, Screen.Settings, Screen.AppUsage, Screen.LevelHistory, Screen.TemperatureHistory -> Screen.Home
             Screen.UsageDetail -> Screen.History
+            Screen.BuildCredits -> Screen.Settings
             Screen.Home -> Screen.Home
         }
     }
 
+    CompositionLocalProvider(
+        LocalAppPalette provides palette,
+        androidx.compose.material3.LocalContentColor provides TextPrimary,
+    ) {
+    val baseScheme = if (isDark) darkColorScheme() else lightColorScheme()
     MaterialTheme(
-        colorScheme = lightColorScheme(
+        colorScheme = baseScheme.copy(
             primary = ChargeGreen,
+            secondary = palette.ChargeGreenDark,
             onPrimary = Color.White,
             background = PageBackground,
             surface = CardBackground,
             onSurface = TextPrimary,
+            onBackground = TextPrimary,
+            onSurfaceVariant = palette.TextSecondary,
+            surfaceVariant = palette.TrackColor,
+            surfaceContainer = CardBackground,
+            surfaceContainerHighest = palette.TrackColor,
+            surfaceContainerHigh = CardBackground,
+            surfaceContainerLow = PageBackground,
+            surfaceContainerLowest = PageBackground,
+            outline = palette.TextSecondary,
         ),
     ) {
         Box(modifier = Modifier.fillMaxSize().background(PageBackground)) {
@@ -292,6 +330,10 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
                 )
 
                 Screen.Settings -> SettingsScreen(
+                    listState = settingsListState,
+                    onOpenBuildCredits = { screen = Screen.BuildCredits },
+                    themeMode = themeMode,
+                    onThemeModeChange = viewModel::setThemeMode,
                     ratedMaxPowerW = ratedMaxPowerW,
                     ratedCapacityMah = ratedCapacityMah,
                     dualCellEnabled = dualCellEnabled,
@@ -315,6 +357,8 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
                     onCheckForUpdates = viewModel::checkForUpdates,
                     onBack = { screen = Screen.Home },
                 )
+
+                Screen.BuildCredits -> BuildCreditsScreen(onBack = { screen = Screen.Settings })
 
                 Screen.AppUsage -> AppUsageScreen(
                     powerAverages = appPowerAverages,
@@ -355,15 +399,18 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
         }
     }
 }
+}
 
 private fun screenDepth(screen: Screen): Int = when (screen) {
     Screen.Home -> 0
     Screen.History, Screen.Health, Screen.Settings, Screen.AppUsage, Screen.LevelHistory, Screen.TemperatureHistory -> 1
-    Screen.Detail, Screen.UsageDetail -> 2
+    Screen.Detail, Screen.UsageDetail, Screen.BuildCredits -> 2
 }
 
 @Composable
-private fun PageHeader(title: String, subtitle: String, onBack: () -> Unit) {
+internal fun PageHeader(title: String, subtitle: String, onBack: () -> Unit) {
+    val palette = LocalAppPalette.current
+    val TextSecondary = palette.TextSecondary
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.height(40.dp),
@@ -421,6 +468,8 @@ private fun HomeScreen(
     onOpenLevelHistory: () -> Unit,
     onOpenTemperatureHistory: () -> Unit,
 ) {
+    val palette = LocalAppPalette.current
+    val TextPrimary = palette.TextPrimary
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
@@ -527,6 +576,10 @@ private fun HomeScreen(
 
 @Composable
 private fun AppUsageEntryCard(onClick: () -> Unit) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextSecondary = palette.TextSecondary
+    val ChargeGreenDark = palette.ChargeGreenDark
     Surface(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).noIndicationClickable(onClick = onClick),
         color = CardBackground,
@@ -554,6 +607,10 @@ private fun AppUsageEntryCard(onClick: () -> Unit) {
 
 @Composable
 private fun SettingsEntryCard(ratedMaxPowerW: Double, ratedCapacityMah: Int, onClick: () -> Unit) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextSecondary = palette.TextSecondary
+    val ChargeGreenDark = palette.ChargeGreenDark
     Surface(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).noIndicationClickable(onClick = onClick),
         color = CardBackground,
@@ -585,6 +642,11 @@ private fun SettingsEntryCard(ratedMaxPowerW: Double, ratedCapacityMah: Int, onC
 
 @Composable
 private fun Header(reading: BatteryReading) {
+    val palette = LocalAppPalette.current
+    val TextPrimary = palette.TextPrimary
+    val TextSecondary = palette.TextSecondary
+    val ChargeGreenDark = palette.ChargeGreenDark
+    val DischargeRedDark = palette.DischargeRedDark
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -620,6 +682,8 @@ private fun Header(reading: BatteryReading) {
 
 @Composable
 private fun PowerGauge(powerW: Double, charging: Boolean, ratedMaxPowerW: Double) {
+    val palette = LocalAppPalette.current
+    val TextPrimary = palette.TextPrimary
     val fraction by animateFloatAsState((powerW / ratedMaxPowerW).coerceIn(0.0, 1.0).toFloat(), label = "power")
     val numberFontSize = when {
         powerW >= 100.0 -> 40.sp
@@ -668,9 +732,9 @@ private fun PowerGauge(powerW: Double, charging: Boolean, ratedMaxPowerW: Double
             // A broad pale tube with an even, concentric inset around the inner disc.
             drawCircle(
                 brush = Brush.radialGradient(
-                    0f to Color(0xFFFFFFFF),
-                    0.76f to Color(0xFFFFFFFF),
-                    1f to Color(0xFFEDF0EE),
+                    0f to if (palette.isDark) Color(0xFF26382C) else Color(0xFFFFFFFF),
+                    0.76f to if (palette.isDark) Color(0xFF26382C) else Color(0xFFFFFFFF),
+                    1f to if (palette.isDark) Color(0xFF18251D) else Color(0xFFEDF0EE),
                     center = center,
                     radius = outerRadius,
                 ),
@@ -689,9 +753,9 @@ private fun PowerGauge(powerW: Double, charging: Boolean, ratedMaxPowerW: Double
             )
             drawCircle(
                 brush = Brush.radialGradient(
-                    0f to Color(0xFFF7FAF6),
-                    0.82f to Color(0xFFF7FAF6),
-                    1f to Color(0xFFFCFDFC),
+                    0f to if (palette.isDark) Color(0xFF152019) else Color(0xFFF7FAF6),
+                    0.82f to if (palette.isDark) Color(0xFF152019) else Color(0xFFF7FAF6),
+                    1f to if (palette.isDark) Color(0xFF1B2920) else Color(0xFFFCFDFC),
                     center = center,
                     radius = innerRadius,
                 ),
@@ -747,6 +811,10 @@ private fun MetricCard(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
 ) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextPrimary = palette.TextPrimary
+    val TextSecondary = palette.TextSecondary
     Card(
         modifier = modifier.height(166.dp).clip(RoundedCornerShape(28.dp))
             .then(if (onClick != null) Modifier.noIndicationClickable(onClick = onClick) else Modifier),
@@ -776,6 +844,11 @@ private fun SmallStatusCard(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
 ) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextPrimary = palette.TextPrimary
+    val TextSecondary = palette.TextSecondary
+    val ChargeGreenDark = palette.ChargeGreenDark
     Surface(
         modifier = modifier.clip(RoundedCornerShape(24.dp))
             .then(if (onClick != null) Modifier.noIndicationClickable(onClick = onClick) else Modifier),
@@ -808,6 +881,11 @@ private fun ChargeCurveCard(
     onClick: (() -> Unit)? = null,
     interactive: Boolean = false,
 ) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextSecondary = palette.TextSecondary
+    val ChargeGreenDark = palette.ChargeGreenDark
+    val DischargeRedDark = palette.DischargeRedDark
     var selectedSample by remember(samples, interactive) {
         mutableStateOf(if (interactive) samples.lastOrNull() else null)
     }
@@ -917,6 +995,11 @@ private fun PowerChart(
     onSelect: ((ChargeSample) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
+    val palette = LocalAppPalette.current
+    val TextSecondary = palette.TextSecondary
+    val TrackColor = palette.TrackColor
+    val ChargeGreenDark = palette.ChargeGreenDark
+    val DischargeRedDark = palette.DischargeRedDark
     if (samples.size < 2) {
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
             Text("暂无足够数据", color = TextSecondary, fontSize = 13.sp)
@@ -957,7 +1040,7 @@ private fun PowerChart(
         val maxTemp = max(45.0, ceil(samples.maxOf { it.temperatureC } + 1.0))
         val tempSpan = (maxTemp - minTemp).coerceAtLeast(1.0)
         val labelPaint = Paint().apply {
-            color = android.graphics.Color.rgb(114, 120, 115)
+            color = palette.TextSecondary.toArgb()
             textSize = 10.sp.toPx()
             isAntiAlias = true
         }
@@ -1046,6 +1129,8 @@ private fun PowerChart(
 
 @Composable
 private fun ChartLegendDot(color: Color, label: String) {
+    val palette = LocalAppPalette.current
+    val TextSecondary = palette.TextSecondary
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(8.dp).clip(CircleShape).background(color))
         Spacer(Modifier.size(6.dp))
@@ -1055,6 +1140,10 @@ private fun ChartLegendDot(color: Color, label: String) {
 
 @Composable
 private fun BatteryLevelCurveCard(samples: List<ChargeSample>) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextSecondary = palette.TextSecondary
+    val TrackColor = palette.TrackColor
     var selectedIndex by remember(samples) { mutableStateOf<Int?>(null) }
     val selected = selectedIndex?.let(samples::getOrNull)
     Card(
@@ -1119,7 +1208,7 @@ private fun BatteryLevelCurveCard(samples: List<ChargeSample>) {
                     val minTime = samples.first().recordedAt
                     val duration = (samples.last().recordedAt - minTime).coerceAtLeast(1L)
                     val paint = Paint().apply {
-                        color = android.graphics.Color.rgb(114, 120, 115)
+                        color = palette.TextSecondary.toArgb()
                         textSize = 10.sp.toPx()
                         isAntiAlias = true
                     }
@@ -1195,6 +1284,9 @@ private fun BatteryLevelCurveCard(samples: List<ChargeSample>) {
 private fun TemperatureHistoryCard(
     samples: List<TemperatureSample>,
 ) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextSecondary = palette.TextSecondary
     var selectedIndex by remember(samples) { mutableStateOf<Int?>(null) }
     val selected = selectedIndex?.let(samples::getOrNull)
     Card(
@@ -1242,6 +1334,9 @@ private fun TemperatureHistoryChart(
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val palette = LocalAppPalette.current
+    val TextSecondary = palette.TextSecondary
+    val TrackColor = palette.TrackColor
     if (samples.size < 2) {
         Box(modifier, contentAlignment = Alignment.Center) {
             Text("持续监控后生成温度曲线", color = TextSecondary, fontSize = 13.sp)
@@ -1285,7 +1380,7 @@ private fun TemperatureHistoryChart(
         val maxTemp = max(45.0, ceil(samples.maxOf { it.temperatureC } + 1.0))
         val span = (maxTemp - minTemp).coerceAtLeast(1.0)
         val paint = Paint().apply {
-            color = android.graphics.Color.rgb(114, 120, 115)
+            color = palette.TextSecondary.toArgb()
             textSize = 10.sp.toPx()
             isAntiAlias = true
         }
@@ -1340,7 +1435,7 @@ private fun TemperatureHistoryChart(
 }
 
 private fun temperatureColor(value: Double): Color = when {
-    value < 20.0 -> Color.Black
+    value < 20.0 -> Color(0xFFA078E8)
     value < 33.0 -> Color(0xFF3D8BFF)
     value < 38.0 -> Color(0xFFF2C94C)
     value < 41.0 -> Color(0xFFFF8A34)
@@ -1355,6 +1450,10 @@ private fun HistoryScreen(
     onSessionClick: (ChargeSession) -> Unit,
     onUsageClick: (UsagePeriod) -> Unit,
 ) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextSecondary = palette.TextSecondary
+    val TrackColor = palette.TrackColor
     val periods = remember(sessions, temperatureSamples) {
         buildUsagePeriods(sessions, temperatureSamples, System.currentTimeMillis())
     }
@@ -1399,7 +1498,7 @@ private fun HistoryScreen(
         items(entries, key = {
             when (it) {
                 is HistoryEntry.Charge -> "charge-${it.session.id}"
-                is HistoryEntry.Usage -> "usage-${it.period.startAt}"
+                is HistoryEntry.Usage -> "usage-${it.period.sourceSessionId}"
             }
         }) { entry ->
             when (entry) {
@@ -1412,6 +1511,9 @@ private fun HistoryScreen(
 
 @Composable
 private fun UsagePeriodCard(period: UsagePeriod, onClick: () -> Unit) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextSecondary = palette.TextSecondary
     Surface(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp)).noIndicationClickable(onClick = onClick),
         shape = RoundedCornerShape(26.dp),
@@ -1448,7 +1550,7 @@ private fun buildUsagePeriods(
     temperatureSamples: List<TemperatureSample>,
     now: Long,
 ): List<UsagePeriod> {
-    val ordered = sessions.sortedBy { it.startedAt }
+    val ordered = sessions.distinctBy { it.id }.sortedBy { it.startedAt }
     return ordered.mapIndexedNotNull { index, session ->
         val startAt = session.endedAt ?: return@mapIndexedNotNull null
         val nextSession = ordered.drop(index + 1).firstOrNull { it.startedAt > startAt }
@@ -1460,8 +1562,9 @@ private fun buildUsagePeriods(
             endAt = endAt,
             startLevel = samples.firstOrNull()?.level ?: session.endLevel,
             endLevel = samples.lastOrNull()?.level ?: nextSession?.startLevel ?: session.endLevel,
+            sourceSessionId = session.id,
         )
-    }
+    }.distinctBy { it.startAt to it.endAt }
 }
 
 private fun latestUsagePeriod(
@@ -1525,6 +1628,9 @@ private fun UsageDetailScreen(
     title: String,
     onBack: () -> Unit,
 ) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextSecondary = palette.TextSecondary
     val context = LocalContext.current
     val reader = remember(context) { AppUsageReader(context.applicationContext) }
     val startAt = period?.startAt ?: (System.currentTimeMillis() - 24L * 60L * 60L * 1000L)
@@ -1532,20 +1638,29 @@ private fun UsageDetailScreen(
     val levelSamples = remember(temperatureSamples, startAt, endAt) {
         temperatureSamples.filter { it.recordedAt in startAt..endAt }
     }
-    val screenOnMs = remember(startAt, endAt) { reader.screenOnDuration(startAt, endAt) }
-    val appSummaries = remember(appPowerSamples, levelSamples, startAt, endAt) {
+    val screenOnMs by produceState(0L, startAt, endAt) {
+        value = withContext(Dispatchers.IO) { runCatching { reader.screenOnDuration(startAt, endAt) }.getOrDefault(0L) }
+    }
+    val appSummaries by produceState<List<IntervalAppSummary>?>(null, appPowerSamples, levelSamples, startAt, endAt) {
+        value = withContext(Dispatchers.IO) {
+        val orderedTemperatures = levelSamples.sortedBy { it.recordedAt }
         appPowerSamples.filter { it.recordedAt in startAt..endAt && !it.isCharging }
             .groupBy { it.packageName }
             .map { (packageName, samples) ->
                 val temperatures = samples.mapNotNull { appSample ->
-                    levelSamples.minByOrNull { abs(it.recordedAt - appSample.recordedAt) }
-                        ?.takeIf { abs(it.recordedAt - appSample.recordedAt) <= 60_000L }
-                        ?.temperatureC
+                    val match = orderedTemperatures.binarySearchBy(appSample.recordedAt) { it.recordedAt }
+                    val insertion = if (match >= 0) match else -match - 1
+                    val before = orderedTemperatures.getOrNull(insertion - 1)
+                    val after = orderedTemperatures.getOrNull(insertion)
+                    val nearest = when {
+                        before == null -> after
+                        after == null -> before
+                        abs(before.recordedAt - appSample.recordedAt) <= abs(after.recordedAt - appSample.recordedAt) -> before
+                        else -> after
+                    }
+                    nearest?.takeIf { abs(it.recordedAt - appSample.recordedAt) <= 60_000L }?.temperatureC
                 }
-                val label = runCatching {
-                    val info = context.packageManager.getApplicationInfo(packageName, 0)
-                    context.packageManager.getApplicationLabel(info).toString()
-                }.getOrDefault(packageName)
+                val label = AppAssets.label(context, packageName)
                 IntervalAppSummary(
                     packageName = packageName,
                     label = label,
@@ -1555,6 +1670,7 @@ private fun UsageDetailScreen(
                     maxTemperatureC = temperatures.maxOrNull(),
                 )
             }.sortedWith(compareByDescending<IntervalAppSummary> { it.durationMs }.thenByDescending { it.averagePowerW })
+        }
     }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -1575,14 +1691,14 @@ private fun UsageDetailScreen(
             )
         }
         item { Text("区间应用使用", fontSize = 20.sp, fontWeight = FontWeight.Bold) }
-        if (appSummaries.isEmpty()) {
+        if (appSummaries.isNullOrEmpty()) {
             item {
                 Surface(color = CardBackground, shape = RoundedCornerShape(24.dp)) {
-                    Text("这个区间暂无应用采样", modifier = Modifier.fillMaxWidth().padding(22.dp), color = TextSecondary)
+                    Text(if (appSummaries == null) "正在整理应用使用记录…" else "这个区间暂无应用采样", modifier = Modifier.fillMaxWidth().padding(22.dp), color = TextSecondary)
                 }
             }
         } else {
-            items(appSummaries, key = { it.packageName }) { IntervalAppUsageCard(it) }
+            items(appSummaries.orEmpty(), key = { it.packageName }) { IntervalAppUsageCard(it) }
         }
     }
 }
@@ -1593,6 +1709,11 @@ private fun UsageLevelCurveCard(
     screenOnMs: Long,
     screenOnLabel: String,
 ) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextSecondary = palette.TextSecondary
+    val TrackColor = palette.TrackColor
+    val ChargeGreenDark = palette.ChargeGreenDark
     var selectedIndex by remember(samples) { mutableStateOf<Int?>(null) }
     val selected = selectedIndex?.let(samples::getOrNull)
     Card(shape = RoundedCornerShape(28.dp), colors = CardDefaults.cardColors(containerColor = CardBackground)) {
@@ -1636,7 +1757,7 @@ private fun UsageLevelCurveCard(
                     val left = 42.dp.toPx()
                     val width = size.width - left
                     val duration = (samples.last().recordedAt - samples.first().recordedAt).coerceAtLeast(1L)
-                    val paint = Paint().apply { color = android.graphics.Color.rgb(114, 120, 115); textSize = 10.sp.toPx(); isAntiAlias = true }
+                    val paint = Paint().apply { color = palette.TextSecondary.toArgb(); textSize = 10.sp.toPx(); isAntiAlias = true }
                     listOf(100, 75, 50, 25, 0).forEachIndexed { index, value ->
                         val y = size.height * index / 4f
                         drawLine(TrackColor, Offset(left, y), Offset(size.width, y), 1.dp.toPx())
@@ -1690,10 +1811,12 @@ private fun UsageLevelCurveCard(
 
 @Composable
 private fun IntervalAppUsageCard(summary: IntervalAppSummary) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextSecondary = palette.TextSecondary
+    val TrackColor = palette.TrackColor
     val context = LocalContext.current
-    val icon = remember(summary.packageName) {
-        runCatching { context.packageManager.getApplicationIcon(summary.packageName).toBitmap(96, 96).asImageBitmap() }.getOrNull()
-    }
+    val icon = rememberAppIcon(context, summary.packageName)
     Surface(modifier = Modifier.fillMaxWidth(), color = CardBackground, shape = RoundedCornerShape(24.dp)) {
         Row(modifier = Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(44.dp).clip(RoundedCornerShape(11.dp)).background(TrackColor), contentAlignment = Alignment.Center) {
@@ -1727,13 +1850,36 @@ private fun AppUsageScreen(
     powerAverages: List<AppPowerAverage>,
     onBack: () -> Unit,
 ) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextSecondary = palette.TextSecondary
+    val TrackColor = palette.TrackColor
+    val ChargeGreenDark = palette.ChargeGreenDark
     val context = LocalContext.current
     val reader = remember(context) { AppUsageReader(context.applicationContext) }
-    var hasPermission by remember { mutableStateOf(reader.hasPermission()) }
-    var rows by remember { mutableStateOf(if (hasPermission) reader.readLast24Hours() else emptyList()) }
+    var hasPermission by remember { mutableStateOf<Boolean?>(null) }
+    var rows by remember { mutableStateOf<List<AppUsageRow>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    var loadError by remember { mutableStateOf(false) }
+    val usageScope = rememberCoroutineScope()
+    var refreshJob by remember { mutableStateOf<Job?>(null) }
     fun refreshUsage() {
-        hasPermission = reader.hasPermission()
-        rows = if (hasPermission) reader.readLast24Hours() else emptyList()
+        if (refreshJob?.isActive == true) return
+        refreshJob = usageScope.launch {
+            loading = true
+            loadError = false
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val allowed = reader.hasPermission()
+                    allowed to if (allowed) reader.readLast24Hours() else emptyList()
+                }
+            }
+            result.onSuccess { (allowed, resultRows) ->
+                hasPermission = allowed
+                rows = resultRows
+            }.onFailure { loadError = true }
+            loading = false
+        }
     }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -1741,12 +1887,13 @@ private fun AppUsageScreen(
         refreshUsage()
     }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { refreshUsage() }
-    val sortedRows = remember(rows, powerAverages) {
+    val powerByPackage = remember(powerAverages) { powerAverages.associateBy { it.packageName } }
+    val sortedRows = remember(rows, powerByPackage) {
         val maxForeground = rows.maxOfOrNull { it.foregroundMs }?.coerceAtLeast(1L)?.toDouble() ?: 1.0
         val maxPower = powerAverages.maxOfOrNull { it.averagePowerW }?.coerceAtLeast(0.1) ?: 0.1
         rows.sortedByDescending { row ->
             val timeScore = row.foregroundMs / maxForeground
-            val powerScore = powerAverages.firstOrNull { it.packageName == row.packageName }
+            val powerScore = powerByPackage[row.packageName]
                 ?.averagePowerW?.div(maxPower) ?: 0.0
             timeScore * 0.65 + powerScore * 0.35
         }
@@ -1765,7 +1912,14 @@ private fun AppUsageScreen(
         item {
             PageHeader("应用使用情况", "近 24 小时前台与后台活动", onBack)
         }
-        if (!hasPermission) {
+        if (hasPermission == null || (loading && rows.isEmpty())) {
+            item {
+                Surface(color = CardBackground, shape = RoundedCornerShape(24.dp)) {
+                    Text(if (loadError) "读取使用情况失败，请返回重试" else "正在读取使用记录…",
+                        Modifier.fillMaxWidth().padding(24.dp), color = TextSecondary)
+                }
+            }
+        } else if (hasPermission == false) {
             item {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
@@ -1826,7 +1980,7 @@ private fun AppUsageScreen(
             items(sortedRows, key = { it.packageName }) { row ->
                 AppUsageCard(
                     row = row,
-                    power = powerAverages.firstOrNull { it.packageName == row.packageName },
+                    power = powerByPackage[row.packageName],
                 )
             }
         }
@@ -1835,14 +1989,13 @@ private fun AppUsageScreen(
 
 @Composable
 private fun AppUsageCard(row: AppUsageRow, power: AppPowerAverage?) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextPrimary = palette.TextPrimary
+    val TextSecondary = palette.TextSecondary
+    val TrackColor = palette.TrackColor
     val context = LocalContext.current
-    val appIcon = remember(row.packageName) {
-        runCatching {
-            context.packageManager.getApplicationIcon(row.packageName)
-                .toBitmap(width = 96, height = 96)
-                .asImageBitmap()
-        }.getOrNull()
-    }
+    val appIcon = rememberAppIcon(context, row.packageName)
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = CardBackground,
@@ -1890,6 +2043,9 @@ private fun AppUsageCard(row: AppUsageRow, power: AppPowerAverage?) {
 
 @Composable
 private fun UsageValue(title: String, value: String) {
+    val palette = LocalAppPalette.current
+    val TextPrimary = palette.TextPrimary
+    val TextSecondary = palette.TextSecondary
     Column(modifier = Modifier.padding(end = 8.dp)) {
         Text(title, color = TextSecondary, fontSize = 11.sp)
         Text(value, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
@@ -2078,6 +2234,11 @@ private fun DualCellModeChoice(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val palette = LocalAppPalette.current
+    val TextPrimary = palette.TextPrimary
+    val TextSecondary = palette.TextSecondary
+    val TrackColor = palette.TrackColor
+    val ChargeGreenDark = palette.ChargeGreenDark
     Surface(
         modifier = modifier.clip(RoundedCornerShape(18.dp)).noIndicationClickable(onClick = onClick),
         color = if (selected) ChargeGreen.copy(alpha = 0.14f) else TrackColor.copy(alpha = 0.65f),
@@ -2107,6 +2268,10 @@ private fun DualCellModeChoice(
 
 @Composable
 private fun SettingsScreen(
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    onOpenBuildCredits: () -> Unit,
+    themeMode: ThemeMode,
+    onThemeModeChange: (ThemeMode) -> Unit,
     ratedMaxPowerW: Double,
     ratedCapacityMah: Int,
     dualCellEnabled: Boolean,
@@ -2130,6 +2295,12 @@ private fun SettingsScreen(
     onCheckForUpdates: () -> Unit,
     onBack: () -> Unit,
 ) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextPrimary = palette.TextPrimary
+    val TextSecondary = palette.TextSecondary
+    val TrackColor = palette.TrackColor
+    val ChargeGreenDark = palette.ChargeGreenDark
     val context = LocalContext.current
     val powerManager = context.getSystemService(PowerManager::class.java)
     val ignoresBatteryOptimization = powerManager.isIgnoringBatteryOptimizations(context.packageName)
@@ -2161,6 +2332,7 @@ private fun SettingsScreen(
     var sliderValue by remember(ratedMaxPowerW) { mutableStateOf(ratedMaxPowerW.toFloat()) }
     var capacityValue by remember(ratedCapacityMah) { mutableIntStateOf(ratedCapacityMah) }
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
             start = 20.dp,
@@ -2172,6 +2344,32 @@ private fun SettingsScreen(
     ) {
         item {
             PageHeader("设置", "充电规格、采样与应用选项", onBack)
+        }
+        item {
+            Surface(color = CardBackground, shape = RoundedCornerShape(28.dp)) {
+                Column(Modifier.fillMaxWidth().padding(20.dp)) {
+                    Text("外观", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text("选择适合当前光线的界面", color = TextSecondary, fontSize = 12.sp)
+                    Spacer(Modifier.height(16.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ThemeMode.entries.forEach { mode ->
+                            val selected = themeMode == mode
+                            Surface(
+                                modifier = Modifier.weight(1f).clip(RoundedCornerShape(16.dp))
+                                    .noIndicationClickable { onThemeModeChange(mode) },
+                                shape = RoundedCornerShape(16.dp),
+                                color = if (selected) ChargeGreen.copy(alpha = 0.16f) else TrackColor.copy(alpha = 0.45f),
+                            ) {
+                                Text(mode.label, modifier = Modifier.padding(vertical = 14.dp),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    color = if (selected) ChargeGreenDark else TextSecondary,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                    fontSize = 13.sp)
+                            }
+                        }
+                    }
+                }
+            }
         }
         item {
             Surface(
@@ -2601,6 +2799,7 @@ private fun SettingsScreen(
                 }
             }
         }
+        item { BuildCreditCard(onOpenBuildCredits) }
     }
 }
 
@@ -2612,6 +2811,11 @@ private fun HealthScreen(
     onBack: () -> Unit,
     onSessionClick: (ChargeSession) -> Unit,
 ) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextSecondary = palette.TextSecondary
+    val TrackColor = palette.TrackColor
+    val ChargeGreenDark = palette.ChargeGreenDark
     val estimatedHealth = remember(sessions, reading.designCapacityMah) {
         estimatedBatteryHealth(sessions, reading.designCapacityMah)
     }
@@ -2794,6 +2998,10 @@ private fun HealthScreen(
 
 @Composable
 private fun SessionCard(session: ChargeSession, onClick: () -> Unit) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
+    val TextSecondary = palette.TextSecondary
+    val ChargeGreenDark = palette.ChargeGreenDark
     Surface(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp)).noIndicationClickable(onClick = onClick),
         shape = RoundedCornerShape(26.dp),
@@ -2910,6 +3118,8 @@ private fun ChargeNavigation(
     hazeState: HazeState,
     modifier: Modifier = Modifier,
 ) {
+    val palette = LocalAppPalette.current
+    val CardBackground = palette.CardBackground
     val shape = RoundedCornerShape(34.dp)
     Box(
         modifier = modifier
@@ -2919,7 +3129,7 @@ private fun ChargeNavigation(
                 bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 12.dp,
             )
             .clip(shape)
-            .border(1.dp, Color.White.copy(alpha = 0.72f), shape)
+            .border(1.dp, palette.TextPrimary.copy(alpha = if (palette.isDark) 0.10f else 0.08f), shape)
             .height(64.dp),
     ) {
         Box(
@@ -2930,8 +3140,8 @@ private fun ChargeNavigation(
                     style = HazeBlurStyle {
                         blurRadius(24.dp)
                         noiseFactor(0.035f)
-                        backgroundColor(Color.White.copy(alpha = 0.52f))
-                        colorEffects(listOf(HazeColorEffect.tint(Color.White.copy(alpha = 0.25f))))
+                        backgroundColor(CardBackground.copy(alpha = 0.70f))
+                        colorEffects(listOf(HazeColorEffect.tint(CardBackground.copy(alpha = 0.25f))))
                     },
                 ),
         )
@@ -2965,6 +3175,9 @@ private fun BottomNavItem(
     label: String,
     modifier: Modifier = Modifier,
 ) {
+    val palette = LocalAppPalette.current
+    val TextPrimary = palette.TextPrimary
+    val TextSecondary = palette.TextSecondary
     val interactionSource = remember { MutableInteractionSource() }
     Column(
         modifier = modifier
@@ -2993,7 +3206,7 @@ private fun BottomNavItem(
 }
 
 @Composable
-private fun Modifier.noIndicationClickable(
+internal fun Modifier.noIndicationClickable(
     enabled: Boolean = true,
     onClick: () -> Unit,
 ): Modifier = clickable(

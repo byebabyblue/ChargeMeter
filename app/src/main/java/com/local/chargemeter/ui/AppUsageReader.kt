@@ -43,7 +43,6 @@ class AppUsageReader(private val context: Context) {
         if (!hasPermission()) return emptyList()
         val now = System.currentTimeMillis()
         val usageManager = context.getSystemService(UsageStatsManager::class.java)
-        val packageManager = context.packageManager
         return usageManager.queryUsageStats(
             UsageStatsManager.INTERVAL_DAILY,
             now - 24L * 60L * 60L * 1000L,
@@ -52,10 +51,7 @@ class AppUsageReader(private val context: Context) {
             .asSequence()
             .filter { it.totalTimeInForeground > 0L || (Build.VERSION.SDK_INT >= 29 && it.totalTimeForegroundServiceUsed > 0L) }
             .map { stats ->
-                val label = runCatching {
-                    val applicationInfo = packageManager.getApplicationInfo(stats.packageName, 0)
-                    packageManager.getApplicationLabel(applicationInfo).toString()
-                }.getOrDefault(stats.packageName)
+                val label = AppAssets.label(context, stats.packageName)
                 AppUsageRow(
                     packageName = stats.packageName,
                     label = label,

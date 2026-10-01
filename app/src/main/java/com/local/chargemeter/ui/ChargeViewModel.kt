@@ -37,6 +37,17 @@ class ChargeViewModel(application: Application) : AndroidViewModel(application) 
     private val reader = BatteryReader(application)
     private val preferences = application.getSharedPreferences("charge_settings", Context.MODE_PRIVATE)
 
+    private val _themeMode = MutableStateFlow(
+        runCatching { ThemeMode.valueOf(preferences.getString("theme_mode", "System") ?: "System") }
+            .getOrDefault(ThemeMode.System),
+    )
+    val themeMode: StateFlow<ThemeMode> = _themeMode
+
+    fun setThemeMode(mode: ThemeMode) {
+        _themeMode.value = mode
+        preferences.edit().putString("theme_mode", mode.name).apply()
+    }
+
     private val _reading = MutableStateFlow(reader.read())
     val reading: StateFlow<BatteryReading> = _reading
     private val _ratedMaxPowerW = MutableStateFlow(

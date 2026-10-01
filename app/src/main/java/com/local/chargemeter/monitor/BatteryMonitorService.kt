@@ -8,7 +8,6 @@ import android.app.Service
 import android.app.AlarmManager
 import android.content.Intent
 import android.os.Build
-import android.os.Bundle
 import android.os.SystemClock
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -62,8 +61,7 @@ class BatteryMonitorService : Service() {
                     powerW = 0.0,
                     plugType = "未连接",
                 )
-                getSystemService(NotificationManager::class.java)
-                    .notify(NOTIFICATION_ID, batteryNotification(disconnected))
+                updateNotifications(disconnected)
                 fluidCloudPublisher.publish(disconnected)
             }
         }
@@ -74,8 +72,7 @@ class BatteryMonitorService : Service() {
                 var lastFluidCloudAt = 0L
                 while (isActive) {
                     val reading = reader.read()
-                    getSystemService(NotificationManager::class.java)
-                        .notify(NOTIFICATION_ID, batteryNotification(reading))
+                    updateNotifications(reading)
                     if (reading.timestamp - lastRecordedAt >= SAMPLE_INTERVAL_MS) {
                         runCatching {
                             repository.record(reading)
@@ -116,6 +113,9 @@ class BatteryMonitorService : Service() {
 
     override fun onDestroy() {
         monitorJob?.cancel()
+        if (Build.VERSION.SDK_INT >= 36) {
+            getSystemService(NotificationManager::class.java).cancel(LIVE_NOTIFICATION_ID)
+        }
         scope.launch {
             (application as ChargeMeterApplication).repository.record(reader.read())
         }
@@ -136,7 +136,18 @@ class BatteryMonitorService : Service() {
             setSound(null, null)
             enableVibration(false)
         }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+        if (Build.VERSION.SDK_INT >= 36) {
+            manager.createNotificationChannel(NotificationChannel(
+                LIVE_CHANNEL_ID, "充电实时状态", NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "实时更新充电状态与状态栏胶囊"
+                setSound(null, null)
+                enableVibration(false)
+                setShowBadge(false)
+            })
+        }
     }
 
     private fun notification(
@@ -151,33 +162,6 @@ class BatteryMonitorService : Service() {
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val requestFluidCloud = Build.VERSION.SDK_INT >= 36 &&
-            fluidCloudEnabled() && reading.isPowerConnected
-        if (requestFluidCloud) {
-            return Notification.Builder(this, CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_notification)
-                .setContentTitle(title)
-                .setContentText(text)
-                .setSubText("充电信息")
-                .setContentIntent(pendingIntent)
-                .setOngoing(true)
-                .setOnlyAlertOnce(true)
-                .setShowWhen(false)
-                .setCategory(Notification.CATEGORY_STATUS)
-                .setProgress(100, reading.level.coerceIn(0, 100), false)
-                .setStyle(
-                    Notification.ProgressStyle()
-                        .setStyledByProgress(false)
-                        .setProgress(reading.level.coerceIn(0, 100)),
-                )
-                .setShortCriticalText(
-                    String.format(Locale.getDefault(), "%.1fW", kotlin.math.abs(reading.powerW)),
-                )
-                .addExtras(Bundle().apply {
-                    putBoolean("android.requestPromotedOngoing", true)
-                })
-                .build()
-        }
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
@@ -189,6 +173,60 @@ class BatteryMonitorService : Service() {
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
+    }
+
+    private fun updateNotifications(reading: com.local.chargemeter.data.BatteryReading) {
+        val manager = getSystemService(NotificationManager::class.java)
+        // A transient notification failure must not terminate the sampling coroutine.
+        runCatching { manager.notify(NOTIFICATION_ID, batteryNotification(reading)) }
+            .onFailure { android.util.Log.e("ChargeMeterMonitor", "Monitor notification update failed", it) }
+        if (Build.VERSION.SDK_INT < 36) return
+        val preferences = getSharedPreferences("charge_settings", MODE_PRIVATE)
+        if (!fluidCloudEnabled() || !reading.isPowerConnected) {
+            manager.cancel(LIVE_NOTIFICATION_ID)
+            preferences.edit().putString(FluidCloudPublisher.KEY_LAST_STATUS,
+                if (fluidCloudEnabled()) "等待连接电源" else "已关闭").apply()
+            return
+        }
+        runCatching {
+            val openIntent = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            val power = kotlin.math.abs(reading.powerW)
+            val chip = if (power >= 100) String.format(Locale.US, "%.0fW", power)
+                else String.format(Locale.US, "%.1fW", power)
+            val status = if (reading.isCharging) "充电中" else "已连接 · 放电中"
+            val notification = Notification.Builder(this, LIVE_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle("$status · $chip")
+                .setContentText(String.format(Locale.getDefault(), "%d%% · %.1f°C · %.2fV · %.2fA",
+                    reading.level, reading.temperatureC, reading.voltageV, kotlin.math.abs(reading.currentA)))
+                .setContentIntent(openIntent)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
+                .setWhen(reading.timestamp)
+                .setCategory(Notification.CATEGORY_PROGRESS)
+                .setColor(android.graphics.Color.rgb(18, 216, 90))
+                .setStyle(Notification.ProgressStyle()
+                    .addProgressSegment(Notification.ProgressStyle.Segment(100)
+                        .setColor(android.graphics.Color.rgb(18, 216, 90)))
+                    .setStyledByProgress(true)
+                    .setProgressTrackerIcon(android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_notification))
+                    .setProgress(reading.level.coerceIn(0, 100)))
+                .setShortCriticalText(chip)
+                .setRequestPromotedOngoing(true)
+                .build()
+            // Keep one stable live-notification ID, separate from the foreground-service notification.
+            manager.notify(LIVE_NOTIFICATION_ID, notification)
+            val statusText = if (manager.canPostPromotedNotifications()) {
+                "实时状态已更新 · " + java.text.SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(java.util.Date(reading.timestamp))
+            } else "请允许系统实时通知权限"
+            preferences.edit().putString(FluidCloudPublisher.KEY_LAST_STATUS, statusText)
+                .putLong(FluidCloudPublisher.KEY_LAST_STATUS_AT, reading.timestamp).apply()
+        }.onFailure {
+            android.util.Log.e("ChargeMeterMonitor", "Live notification update failed", it)
+            preferences.edit().putString(FluidCloudPublisher.KEY_LAST_STATUS, "实时状态更新失败，请重新开启").apply()
+        }
     }
 
     private fun batteryNotification(reading: com.local.chargemeter.data.BatteryReading): Notification {
@@ -245,6 +283,8 @@ class BatteryMonitorService : Service() {
         private const val ACTION_KEEP_ALIVE = "com.local.chargemeter.action.KEEP_ALIVE"
         private const val CHANNEL_ID = "charge_monitor"
         private const val NOTIFICATION_ID = 37
+        private const val LIVE_NOTIFICATION_ID = 38
+        private const val LIVE_CHANNEL_ID = "charge_live_status"
         private const val RESTART_REQUEST_CODE = 38
         private const val RESTART_AFTER_TASK_REMOVED_MS = 1_500L
         private const val RESTART_AFTER_DESTROYED_MS = 4_000L
