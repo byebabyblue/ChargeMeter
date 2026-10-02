@@ -85,8 +85,12 @@ internal fun BuildCreditCard(onClick: () -> Unit) {
                 Spacer(Modifier.size(16.dp))
                 Column {
                     Text("本版本由", color = palette.TextSecondary, fontSize = 12.sp)
-                    Text("GPT-6.1 Sol", color = palette.TextPrimary, fontSize = 25.sp,
-                        fontWeight = FontWeight.Bold, letterSpacing = (-0.5).sp)
+                    currentBuildModels.forEachIndexed { index, model ->
+                        Text(model, color = buildModelColor(model, palette.isDark),
+                            fontSize = if (index == 0) 25.sp else 13.sp,
+                            fontWeight = if (index == 0) FontWeight.Bold else FontWeight.Medium,
+                            letterSpacing = (-0.5).sp)
+                    }
                     Text("参与构建", color = palette.TextSecondary, fontSize = 13.sp)
                 }
             }

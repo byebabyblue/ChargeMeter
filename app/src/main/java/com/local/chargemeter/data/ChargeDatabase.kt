@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [ChargeSession::class, ChargeSample::class, TemperatureSample::class, AppPowerSample::class],
-    version = 10,
+    version = 12,
     exportSchema = false,
 )
 abstract class ChargeDatabase : RoomDatabase() {
@@ -33,7 +33,40 @@ abstract class ChargeDatabase : RoomDatabase() {
                 MIGRATION_7_8,
                 MIGRATION_8_9,
                 MIGRATION_9_10,
+                MIGRATION_10_11,
+                MIGRATION_11_12,
             ).build().also { instance = it }
+        }
+
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_charge_samples_sessionId_recordedAt ON charge_samples(sessionId, recordedAt)")
+                // Align legacy capacity totals with the retained endpoint after tail cleanup.
+                db.execSQL("UPDATE charge_sessions SET chargedMah = MAX(0.0, COALESCE((SELECT chargeCounterMah FROM charge_samples WHERE sessionId = charge_sessions.id ORDER BY recordedAt DESC, id DESC LIMIT 1), startChargeCounterMah) - startChargeCounterMah) WHERE endedAt IS NOT NULL AND startChargeCounterMah > 0 AND COALESCE((SELECT chargeCounterMah FROM charge_samples WHERE sessionId = charge_sessions.id ORDER BY recordedAt DESC, id DESC LIMIT 1), 0) > 0")
+                db.execSQL("UPDATE charge_sessions SET estimatedHealthPct = CASE WHEN endedAt IS NOT NULL AND sampleCount >= 2 AND maxSampleGapMs <= 120000 AND endLevel - startLevel >= 60 AND chargedMah > 0 THEN MAX(50.0, MIN(100.0, chargedMah * 10000.0 / ((endLevel - startLevel) * designCapacityMah))) ELSE 0 END")
+            }
+        }
+
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE charge_sessions ADD COLUMN maxSampleGapMs INTEGER NOT NULL DEFAULT 0")
+                val gaps = mutableMapOf<Long, Long>()
+                var previousSession = -1L
+                var previousTime = 0L
+                db.query("SELECT sessionId, recordedAt FROM charge_samples ORDER BY sessionId, recordedAt").use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val session = cursor.getLong(0)
+                        val time = cursor.getLong(1)
+                        if (session == previousSession) gaps[session] = maxOf(gaps[session] ?: 0L, time - previousTime)
+                        previousSession = session
+                        previousTime = time
+                    }
+                }
+                gaps.forEach { (id, gap) ->
+                    db.execSQL("UPDATE charge_sessions SET maxSampleGapMs = ? WHERE id = ?", arrayOf(gap, id))
+                }
+                db.execSQL("UPDATE charge_sessions SET estimatedHealthPct = 0 WHERE maxSampleGapMs > 120000 OR sampleCount < 2 OR endedAt IS NULL")
+            }
         }
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {

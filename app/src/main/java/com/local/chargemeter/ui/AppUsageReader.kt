@@ -39,57 +39,88 @@ class AppUsageReader(private val context: Context) {
             .isNotEmpty()
     }
 
+    private var lastEventAt = 0L
+    private var foregroundPackage: String? = null
+
     fun readLast24Hours(): List<AppUsageRow> {
         if (!hasPermission()) return emptyList()
         val now = System.currentTimeMillis()
-        val usageManager = context.getSystemService(UsageStatsManager::class.java)
-        return usageManager.queryUsageStats(
-            UsageStatsManager.INTERVAL_DAILY,
-            now - 24L * 60L * 60L * 1000L,
-            now,
-        ).orEmpty()
-            .asSequence()
-            .filter { it.totalTimeInForeground > 0L || (Build.VERSION.SDK_INT >= 29 && it.totalTimeForegroundServiceUsed > 0L) }
-            .map { stats ->
-                val label = AppAssets.label(context, stats.packageName)
-                AppUsageRow(
-                    packageName = stats.packageName,
-                    label = label,
-                    foregroundMs = stats.totalTimeInForeground,
-                    backgroundServiceMs = if (Build.VERSION.SDK_INT >= 29) stats.totalTimeForegroundServiceUsed else 0L,
-                )
+        val start = now - 24L * 60L * 60L * 1000L
+        val events = context.getSystemService(UsageStatsManager::class.java)
+            .queryEvents((start - 24L * 60L * 60L * 1000L).coerceAtLeast(0L), now) ?: return emptyList()
+        val foreground = mutableMapOf<String, Long>()
+        val services = mutableMapOf<String, Long>()
+        val activeActivities = mutableMapOf<String, MutableSet<String>>()
+        val activeServices = mutableMapOf<String, MutableSet<String>>()
+        val foregroundTotals = mutableMapOf<String, Long>()
+        val serviceTotals = mutableMapOf<String, Long>()
+        fun close(pkg: String, at: Long, active: MutableMap<String, Long>, totals: MutableMap<String, Long>) {
+            active.remove(pkg)?.let { from ->
+                totals[pkg] = (totals[pkg] ?: 0L) + (at.coerceAtMost(now) - from.coerceAtLeast(start)).coerceAtLeast(0L)
             }
-            .groupBy { it.packageName }
-            .map { (_, rows) ->
-                AppUsageRow(
-                    packageName = rows.first().packageName,
-                    label = rows.first().label,
-                    foregroundMs = rows.sumOf { it.foregroundMs },
-                    backgroundServiceMs = rows.sumOf { it.backgroundServiceMs },
-                )
+        }
+        val event = UsageEvents.Event()
+        while (events.hasNextEvent()) {
+            events.getNextEvent(event)
+            // Screen and shutdown events need not carry a package name.
+            if (event.eventType == UsageEvents.Event.SCREEN_NON_INTERACTIVE ||
+                event.eventType == UsageEvents.Event.DEVICE_SHUTDOWN) {
+                foreground.keys.toList().forEach { close(it, event.timeStamp, foreground, foregroundTotals) }
+                activeActivities.clear()
+                if (event.eventType == UsageEvents.Event.DEVICE_SHUTDOWN) {
+                    services.keys.toList().forEach { close(it, event.timeStamp, services, serviceTotals) }
+                    activeServices.clear()
+                }
+                continue
             }
-            .sortedByDescending { it.foregroundMs }
-            .take(50)
-            .toList()
+            val pkg = event.packageName ?: continue
+            val component = event.className ?: pkg
+            when (event.eventType) {
+                UsageEvents.Event.MOVE_TO_FOREGROUND -> {
+                    if (activeActivities.getOrPut(pkg) { mutableSetOf() }.add(component)) foreground.putIfAbsent(pkg, event.timeStamp)
+                }
+                UsageEvents.Event.MOVE_TO_BACKGROUND -> {
+                    activeActivities[pkg]?.remove(component)
+                    if (activeActivities[pkg].isNullOrEmpty()) close(pkg, event.timeStamp, foreground, foregroundTotals)
+                }
+                UsageEvents.Event.FOREGROUND_SERVICE_START -> {
+                    if (activeServices.getOrPut(pkg) { mutableSetOf() }.add(component)) services.putIfAbsent(pkg, event.timeStamp)
+                }
+                UsageEvents.Event.FOREGROUND_SERVICE_STOP -> {
+                    activeServices[pkg]?.remove(component)
+                    if (activeServices[pkg].isNullOrEmpty()) close(pkg, event.timeStamp, services, serviceTotals)
+                }
+            }
+        }
+        foreground.keys.toList().forEach { close(it, now, foreground, foregroundTotals) }
+        services.keys.toList().forEach { close(it, now, services, serviceTotals) }
+        return (foregroundTotals.keys + serviceTotals.keys).map { pkg ->
+            AppUsageRow(pkg, AppAssets.label(context, pkg), foregroundTotals[pkg] ?: 0L, serviceTotals[pkg] ?: 0L)
+        }.filter { it.foregroundMs > 0 || it.backgroundServiceMs > 0 }
+            .sortedByDescending { it.foregroundMs }.take(50)
     }
 
     fun currentForegroundPackage(): String? {
-        if (!hasPermission()) return null
-        val usageManager = context.getSystemService(UsageStatsManager::class.java)
+        if (!hasPermission()) {
+            lastEventAt = 0L
+            foregroundPackage = null
+            return null
+        }
         val now = System.currentTimeMillis()
-        val events = usageManager.queryEvents(now - 10L * 60L * 1000L, now)
+        if (lastEventAt > now) { lastEventAt = 0L; foregroundPackage = null }
+        val from = if (lastEventAt == 0L) now - 24L * 60L * 60L * 1000L else lastEventAt
+        val events = context.getSystemService(UsageStatsManager::class.java).queryEvents(from, now) ?: return null
         val event = UsageEvents.Event()
-        var foregroundPackage: String? = null
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
             when (event.eventType) {
                 UsageEvents.Event.MOVE_TO_FOREGROUND -> foregroundPackage = event.packageName
-                UsageEvents.Event.MOVE_TO_BACKGROUND -> {
-                    if (foregroundPackage == event.packageName) foregroundPackage = null
-                }
+                UsageEvents.Event.MOVE_TO_BACKGROUND -> if (foregroundPackage == event.packageName) foregroundPackage = null
+                UsageEvents.Event.SCREEN_NON_INTERACTIVE, UsageEvents.Event.DEVICE_SHUTDOWN -> foregroundPackage = null
             }
         }
-        return foregroundPackage
+        lastEventAt = now
+        return foregroundPackage.takeIf { context.getSystemService(android.os.PowerManager::class.java).isInteractive }
     }
 
     fun screenOnDuration(startAt: Long, endAt: Long): Long {

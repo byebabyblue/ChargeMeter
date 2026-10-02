@@ -189,6 +189,7 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
             }
         }
     }
+    var screen by remember { mutableStateOf(Screen.Home) }
     val reading by viewModel.reading.collectAsStateWithLifecycle()
     val sessions by viewModel.sessions.collectAsStateWithLifecycle()
     val recentSamples by viewModel.recentSamples.collectAsStateWithLifecycle()
@@ -199,6 +200,7 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
     val dualCellEnabled by viewModel.dualCellEnabled.collectAsStateWithLifecycle()
     val dualCellMode by viewModel.dualCellMode.collectAsStateWithLifecycle()
     val notificationEnabled by viewModel.notificationEnabled.collectAsStateWithLifecycle()
+    val enhancedBackgroundRecording by viewModel.enhancedBackgroundRecording.collectAsStateWithLifecycle()
     val fluidCloudEnabled by viewModel.fluidCloudEnabled.collectAsStateWithLifecycle()
     val hideFromRecents by viewModel.hideFromRecents.collectAsStateWithLifecycle()
     val currentDirectionInverted by viewModel.currentDirectionInverted.collectAsStateWithLifecycle()
@@ -207,12 +209,15 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
     val updateUrl by viewModel.updateUrl.collectAsStateWithLifecycle()
     val updateUi by viewModel.updateUi.collectAsStateWithLifecycle()
     val autoCheckUpdates by viewModel.autoCheckUpdates.collectAsStateWithLifecycle()
-    val temperatureSamples by viewModel.temperatureSamples.collectAsStateWithLifecycle()
-    val appPowerAverages by viewModel.appPowerAverages.collectAsStateWithLifecycle()
-    val appPowerSamples by viewModel.appPowerSamples.collectAsStateWithLifecycle()
+    val temperatureSamples = when (screen) {
+        Screen.History, Screen.LevelHistory, Screen.UsageDetail -> viewModel.temperatureSamples.collectAsStateWithLifecycle().value
+        Screen.Health, Screen.TemperatureHistory -> viewModel.recentTemperatureSamples.collectAsStateWithLifecycle().value
+        else -> emptyList()
+    }
+    val appPowerAverages = if (screen == Screen.AppUsage) viewModel.appPowerAverages.collectAsStateWithLifecycle().value else emptyList()
+    val appPowerSamples = if (screen == Screen.LevelHistory || screen == Screen.UsageDetail) viewModel.appPowerSamples.collectAsStateWithLifecycle().value else emptyList()
     val hazeState = rememberHazeState()
     val settingsListState = androidx.compose.foundation.lazy.rememberLazyListState()
-    var screen by remember { mutableStateOf(Screen.Home) }
     var detailReturnScreen by remember { mutableStateOf(Screen.Home) }
     var selectedUsagePeriod by remember { mutableStateOf<UsagePeriod?>(null) }
 
@@ -293,7 +298,7 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
                             screen = Screen.AppUsage
                         },
                         onOpenLevelHistory = {
-                            selectedUsagePeriod = latestUsagePeriod(sessions, temperatureSamples, reading)
+                            selectedUsagePeriod = null
                             screen = Screen.LevelHistory
                         },
                         onOpenTemperatureHistory = { screen = Screen.TemperatureHistory },
@@ -343,6 +348,8 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
                     dualCellEnabled = dualCellEnabled,
                     dualCellMode = dualCellMode,
                     notificationEnabled = notificationEnabled,
+                    enhancedBackgroundRecording = enhancedBackgroundRecording,
+                    onEnhancedBackgroundRecordingChange = viewModel::setEnhancedBackgroundRecording,
                     fluidCloudEnabled = fluidCloudEnabled,
                     hideFromRecents = hideFromRecents,
                     currentDirectionInverted = currentDirectionInverted,
@@ -372,7 +379,7 @@ fun ChargeMeterApp(viewModel: ChargeViewModel = viewModel()) {
                 )
 
                 Screen.LevelHistory -> UsageDetailScreen(
-                    period = selectedUsagePeriod ?: latestUsagePeriod(sessions, temperatureSamples, reading),
+                    period = latestUsagePeriod(sessions, temperatureSamples, reading.copy(timestamp = (reading.timestamp / 30_000L) * 30_000L)),
                     temperatureSamples = temperatureSamples,
                     appPowerSamples = appPowerSamples,
                     title = "电量记录",
@@ -1578,13 +1585,14 @@ private fun latestUsagePeriod(
     temperatureSamples: List<TemperatureSample>,
     reading: BatteryReading,
 ): UsagePeriod? {
-    val lastFull = sessions.filter { it.endedAt != null && it.endLevel >= 99 }.maxByOrNull { it.endedAt ?: 0L }
+    val lastFull = sessions.filter { it.endedAt != null && (it.endLevel > it.startLevel || it.chargedMah > 0.0) }.maxByOrNull { it.endedAt ?: 0L }
     if (lastFull != null) {
         val startAt = lastFull.endedAt ?: lastFull.startedAt
-        val samples = temperatureSamples.filter { it.recordedAt in startAt..reading.timestamp && !it.isCharging }
+        val endAt = reading.timestamp.coerceAtLeast(startAt)
+        val samples = temperatureSamples.filter { it.recordedAt in startAt..endAt && !it.isCharging }
         return UsagePeriod(
             startAt = startAt,
-            endAt = reading.timestamp,
+            endAt = endAt,
             startLevel = samples.firstOrNull()?.level ?: lastFull.endLevel,
             endLevel = samples.lastOrNull()?.level ?: reading.level,
         )
@@ -1693,7 +1701,7 @@ private fun UsageDetailScreen(
             UsageLevelCurveCard(
                 samples = levelSamples,
                 screenOnMs = screenOnMs,
-                screenOnLabel = if (title == "电量记录") "上次充满后亮屏" else "本区间亮屏",
+                screenOnLabel = if (title == "电量记录") "上次充电后亮屏" else "本区间亮屏",
             )
         }
         item { Text("区间应用使用", fontSize = 20.sp, fontWeight = FontWeight.Bold) }
@@ -2283,6 +2291,8 @@ private fun SettingsScreen(
     dualCellEnabled: Boolean,
     dualCellMode: DualCellMode,
     notificationEnabled: Boolean,
+    enhancedBackgroundRecording: Boolean,
+    onEnhancedBackgroundRecordingChange: (Boolean) -> Unit,
     fluidCloudEnabled: Boolean,
     hideFromRecents: Boolean,
     currentDirectionInverted: Boolean,
@@ -2555,6 +2565,33 @@ private fun SettingsScreen(
         item {
             Text("后台记录", color = TextSecondary, fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
+        }
+
+        item {
+            Surface(color = CardBackground, shape = RoundedCornerShape(24.dp)) {
+                Column(Modifier.fillMaxWidth().padding(18.dp)) {
+                    Row(Modifier.fillMaxWidth().noIndicationClickable {
+                        onEnhancedBackgroundRecordingChange(!enhancedBackgroundRecording)
+                    }, verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("增强后台记录", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Text(if (enhancedBackgroundRecording) "已开启 · 息屏后持续采样" else "已关闭 · 使用标准记录模式",
+                                color = TextSecondary, fontSize = 12.sp)
+                        }
+                        Switch(checked = enhancedBackgroundRecording,
+                            onCheckedChange = onEnhancedBackgroundRecordingChange)
+                    }
+                    Text("减少休眠造成的采样中断，会增加待机耗电。需开启实时通知，并允许后台活动与忽略电池优化。",
+                        color = TextSecondary, fontSize = 12.sp, lineHeight = 18.sp,
+                        modifier = Modifier.padding(top = 10.dp))
+                    if (enhancedBackgroundRecording && !notificationEnabled) {
+                        Text("请先开启状态栏实时通知", color = DischargeRed, fontSize = 12.sp)
+                    }
+                    if (enhancedBackgroundRecording && !ignoresBatteryOptimization) {
+                        Text("请在下方允许忽略电池优化", color = DischargeRed, fontSize = 12.sp)
+                    }
+                }
+            }
         }
 
         item {
@@ -2976,7 +3013,7 @@ private fun HealthScreen(
                 Column(modifier = Modifier.padding(18.dp)) {
                     Text("健康度权重", fontWeight = FontWeight.Bold, color = ChargeGreenDark)
                     Text(
-                        "采用 AccuBattery 2.0 的样本标准：只有单次电量增加至少 60 个百分点的记录才参与估算，并仅使用最近 5 次有效充电。小于 60% 的记录仍会显示，但不进入健康度。5 次样本按实际充入量与电量增幅合并计算。",
+                        "单次充入至少 60%，且充电已结束、测量记录完整时才参与估算。仅使用最近 5 次有效充电，收集不足 5 次不显示数值。采样缺口超过 2 分钟的记录仍会保留，但不进入健康度。",
                         color = TextSecondary,
                         fontSize = 13.sp,
                         lineHeight = 20.sp,
@@ -2998,13 +3035,15 @@ private fun HealthScreen(
             }
         }
         items(daily, key = { it.date.toEpochDay() }) { day ->
+            var expanded by androidx.compose.runtime.saveable.rememberSaveable(day.date.toString()) { mutableStateOf(false) }
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 color = CardBackground,
                 shape = RoundedCornerShape(24.dp),
             ) {
                 Column(modifier = Modifier.padding(18.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().noIndicationClickable { expanded = !expanded },
+                        verticalAlignment = Alignment.CenterVertically) {
                         Column(modifier = Modifier.weight(1f)) {
                         Text(day.date.format(DateTimeFormatter.ofPattern("M月d日")), fontWeight = FontWeight.Bold, fontSize = 17.sp)
                         Text(
@@ -3015,12 +3054,15 @@ private fun HealthScreen(
                         Text(
                             "系统循环 ${day.systemCycleCount} 次 · " + if (day.estimatedHealthPct > 0) {
                                 "容量估算 ${String.format(Locale.getDefault(), "%.0f%%", day.estimatedHealthPct)}"
-                            } else "当天没有达到 60% 的有效样本",
+                            } else "当天没有可用于健康度估算的完整样本",
                             color = TextSecondary,
                             fontSize = 12.sp,
                         )
                         }
+                        Text(if (expanded) "收起" else "展开", color = ChargeGreenDark, fontSize = 12.sp)
                     }
+                    androidx.compose.animation.AnimatedVisibility(visible = expanded) {
+                    Column {
                     Spacer(Modifier.height(12.dp))
                     day.sessions.sortedByDescending { it.startedAt }.forEachIndexed { index, session ->
                         if (index > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(TrackColor))
@@ -3039,11 +3081,18 @@ private fun HealthScreen(
                                         fontSize = 12.sp,
                                     )
                                 } else {
-                                    Text("未计入健康度 · 单次充入不足 60%", color = TextSecondary, fontSize = 12.sp)
+                                    Text(when {
+                                        session.endedAt == null -> "充电进行中 · 暂不计入健康度"
+                                        session.maxSampleGapMs > MISSING_SAMPLE_INTERVAL_MS -> "未计入健康度 · 采样记录不完整"
+                                        session.chargedMah <= 0.0 || session.sampleCount < 2 -> "未计入健康度 · 测量数据不足"
+                                        else -> "未计入健康度 · 单次充入不足 60%"
+                                    }, color = TextSecondary, fontSize = 12.sp)
                                 }
                             }
                             Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = TextSecondary)
                         }
+                    }
+                    }
                     }
                 }
             }
@@ -3087,8 +3136,10 @@ private fun SessionCard(session: ChargeSession, onClick: () -> Unit) {
                 )
                 Text(
                     when {
-                        session.endedAt == null -> "充电进行中 · 达到 60% 后成为有效样本"
+                        session.endedAt == null -> "充电进行中 · 结束后检查记录完整性"
                         isUsableHealthEstimate(session) -> "健康度有效样本"
+                        session.maxSampleGapMs > MISSING_SAMPLE_INTERVAL_MS -> "未纳入健康度 · 采样记录不完整"
+                        session.sampleCount < 2 || session.chargedMah <= 0.0 -> "未纳入健康度 · 测量数据不足"
                         else -> "未纳入健康度 · 单次充入不足 60%"
                     },
                     color = if (isUsableHealthEstimate(session)) ChargeGreenDark else TextSecondary,
@@ -3113,6 +3164,7 @@ private fun DetailScreen(
     reading: BatteryReading,
     onBack: () -> Unit,
 ) {
+    val palette = LocalAppPalette.current
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
@@ -3134,7 +3186,7 @@ private fun DetailScreen(
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(30.dp),
-                color = ChargeGreen,
+                color = if (palette.isDark) Color(0xFF183D2A) else ChargeGreen,
             ) {
                 Column(modifier = Modifier.padding(24.dp)) {
                     Text("本次峰值功率", color = Color.White.copy(alpha = 0.78f), fontSize = 13.sp)
@@ -3319,7 +3371,9 @@ private fun estimatedBatteryHealth(
 }
 
 private fun isUsableHealthEstimate(session: ChargeSession): Boolean =
-    session.chargedMah > 0.0 && session.endLevel - session.startLevel >= 60
+    session.endedAt != null && session.sampleCount >= 2 &&
+        session.maxSampleGapMs <= MISSING_SAMPLE_INTERVAL_MS &&
+        session.chargedMah > 0.0 && session.endLevel - session.startLevel >= 60
 
 private fun capacityHealthForSession(session: ChargeSession, designCapacityMah: Int): Double {
     val gainedPercent = (session.endLevel - session.startLevel).coerceAtLeast(1)

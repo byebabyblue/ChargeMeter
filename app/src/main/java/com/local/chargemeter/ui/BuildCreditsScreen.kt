@@ -42,15 +42,6 @@ import androidx.compose.ui.unit.sp
 import com.local.chargemeter.BuildConfig
 import com.local.chargemeter.R
 
-private data class BuildContribution(val version: String, val publishedAt: String, val models: List<String>)
-
-private val releasedBuilds = listOf(
-    BuildContribution("1.0.3", "2026.10.01", listOf("GPT-6.1 Sol")),
-    BuildContribution("1.0.2", "2026.09.30", listOf("GPT-5.6 Sol")),
-    BuildContribution("1.0.1", "2026.09.29", listOf("GPT-5.6 Sol", "GPT-6 Astra")),
-    BuildContribution("1.0.0", "2026.09.29", listOf("GPT-5.6 Sol", "GPT-6 Astra")),
-)
-
 @Composable
 internal fun BuildCreditsScreen(onBack: () -> Unit) {
     val palette = LocalAppPalette.current
@@ -101,7 +92,7 @@ private fun CurrentBuildHero() {
                 Text("CURRENT BUILD", fontSize = 9.sp, letterSpacing = 2.sp,
                     color = palette.ChargeGreenDark, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Surface(color = palette.TrackColor.copy(alpha = 0.6f), shape = RoundedCornerShape(50)) {
-                    Text("2026.10.01", Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    Text(currentBuildDate, Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                         color = palette.TextSecondary, fontSize = 11.sp)
                 }
             }
@@ -116,14 +107,18 @@ private fun CurrentBuildHero() {
                 Spacer(Modifier.width(16.dp))
                 Column {
                     Text("v${BuildConfig.VERSION_NAME}", color = palette.TextSecondary, fontSize = 14.sp)
-                    Text("GPT-6.1 Sol", color = palette.TextPrimary, fontSize = 26.sp,
-                        fontWeight = FontWeight.Bold, letterSpacing = (-0.5).sp)
+                    currentBuildModels.forEachIndexed { index, model ->
+                        Text(model, color = buildModelColor(model, palette.isDark),
+                            fontSize = if (index == 0) 26.sp else 17.sp,
+                            fontWeight = if (index == 0) FontWeight.Bold else FontWeight.Medium,
+                            letterSpacing = (-0.5).sp)
+                    }
                 }
             }
             Spacer(Modifier.height(20.dp))
             Box(Modifier.fillMaxWidth().height(1.dp).background(palette.TextPrimary.copy(alpha = 0.07f)))
             Spacer(Modifier.height(14.dp))
-            Text("本版本由 GPT-6.1 Sol 参与构建", color = palette.TextSecondary, fontSize = 12.sp)
+            Text("本版本由以上模型参与构建", color = palette.TextSecondary, fontSize = 12.sp)
         }
     }
 }

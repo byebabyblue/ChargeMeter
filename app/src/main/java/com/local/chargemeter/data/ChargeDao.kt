@@ -8,6 +8,9 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ChargeDao {
+    @Query("SELECT * FROM charge_samples WHERE sessionId = :sessionId ORDER BY recordedAt ASC, id ASC")
+    suspend fun getSamples(sessionId: Long): List<ChargeSample>
+
     @Insert
     suspend fun insertSession(session: ChargeSession): Long
 

@@ -18,6 +18,9 @@ import com.local.chargemeter.monitor.BatteryReader
 import com.local.chargemeter.monitor.DualCellMode
 import com.local.chargemeter.monitor.BatteryMonitorService
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -74,6 +77,19 @@ class ChargeViewModel(application: Application) : AndroidViewModel(application) 
         preferences.getBoolean("monitor_notification_enabled", true),
     )
     val notificationEnabled: StateFlow<Boolean> = _notificationEnabled
+    private val _enhancedBackgroundRecording = MutableStateFlow(
+        preferences.getBoolean("enhanced_background_recording", false),
+    )
+    val enhancedBackgroundRecording: StateFlow<Boolean> = _enhancedBackgroundRecording
+
+    fun setEnhancedBackgroundRecording(enabled: Boolean) {
+        _enhancedBackgroundRecording.value = enabled
+        preferences.edit().putBoolean("enhanced_background_recording", enabled).apply()
+        if (_notificationEnabled.value) {
+            val context = getApplication<Application>()
+            context.startForegroundService(Intent(context, BatteryMonitorService::class.java))
+        }
+    }
     private val _fluidCloudEnabled = MutableStateFlow(
         preferences.getBoolean("fluid_cloud_enabled", true),
     )
@@ -136,17 +152,17 @@ class ChargeViewModel(application: Application) : AndroidViewModel(application) 
         emptyList(),
     )
 
-    val temperatureSamples: StateFlow<List<TemperatureSample>> = repository.observeTemperatureSince(
-        System.currentTimeMillis() - 30L * 24L * 60L * 60L * 1000L,
-    ).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    private fun <T> rollingSamples(days: Long, query: (Long) -> Flow<List<T>>): StateFlow<List<T>> = flow {
+        while (true) {
+            emit(System.currentTimeMillis() - days * 24L * 60L * 60L * 1000L)
+            delay(60_000L)
+        }
+    }.flatMapLatest(query).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val appPowerSamples: StateFlow<List<AppPowerSample>> = repository.observeAppPowerSamplesSince(
-        System.currentTimeMillis() - 7L * 24L * 60L * 60L * 1000L,
-    ).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-
-    val appPowerAverages: StateFlow<List<AppPowerAverage>> = repository.observeAppPowerAverages(
-        System.currentTimeMillis() - 24L * 60L * 60L * 1000L,
-    ).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val recentTemperatureSamples = rollingSamples(1L, repository::observeTemperatureSince)
+    val temperatureSamples = rollingSamples(30L, repository::observeTemperatureSince)
+    val appPowerSamples = rollingSamples(7L, repository::observeAppPowerSamplesSince)
+    val appPowerAverages = rollingSamples(1L, repository::observeAppPowerAverages)
 
     private val selectedSessionId = MutableStateFlow<Long?>(null)
     val selectedSession: StateFlow<ChargeSession?> = selectedSessionId.flatMapLatest { id ->
@@ -160,20 +176,27 @@ class ChargeViewModel(application: Application) : AndroidViewModel(application) 
     init {
         if (_autoCheckUpdates.value) checkUpdate(showAlways = false)
         viewModelScope.launch {
-            while (isActive) {
-                val before = _updateUi.value
-                if (before.release != null && !before.checking) {
-                    runCatching { updater.status(before) }.onSuccess {
-                        _updateUi.value = it.copy(visible = _updateUi.value.visible)
+            _updateUi.subscriptionCount.collectLatest { subscribers ->
+                if (subscribers == 0) return@collectLatest
+                while (isActive) {
+                    val before = _updateUi.value
+                    if (before.release != null && !before.checking && (before.downloading || before.visible)) {
+                        runCatching { updater.status(before) }.onSuccess {
+                            // A check, download or dismissal may have changed state during IO.
+                            if (_updateUi.value == before) _updateUi.value = it
+                        }
                     }
+                    delay(1_000)
                 }
-                delay(1_000)
             }
         }
         viewModelScope.launch {
-            while (isActive) {
-                _reading.value = reader.read()
-                delay(1_000)
+            _reading.subscriptionCount.collectLatest { subscribers ->
+                if (subscribers == 0) return@collectLatest
+                while (isActive) {
+                    _reading.value = withContext(Dispatchers.IO) { reader.read() }
+                    delay(1_000)
+                }
             }
         }
     }

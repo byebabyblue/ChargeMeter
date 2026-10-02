@@ -10,6 +10,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.SystemClock
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.local.chargemeter.ChargeMeterApplication
 import com.local.chargemeter.MainActivity
@@ -19,6 +20,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -30,6 +33,32 @@ class BatteryMonitorService : Service() {
     private lateinit var appUsageReader: AppUsageReader
     private lateinit var fluidCloudPublisher: FluidCloudPublisher
     private var monitorJob: Job? = null
+    private var samplingWakeLock: PowerManager.WakeLock? = null
+    private var lastWakeRenewal = 0L
+
+    private var stopping = false
+    private var lastNotificationContent: String? = null
+    private var lastLiveContent: String? = null
+
+    @Synchronized
+    private fun refreshSamplingWakeLock() {
+        if (stopping) return
+        val enabled = monitorEnabled() && getSharedPreferences("charge_settings", MODE_PRIVATE)
+            .getBoolean("enhanced_background_recording", false)
+        if (!enabled) {
+            samplingWakeLock?.let { if (it.isHeld) it.release() }
+            lastWakeRenewal = 0L
+            return
+        }
+        val lock = samplingWakeLock ?: getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ChargeMeter:ContinuousSampling")
+            .apply { setReferenceCounted(false) }.also { samplingWakeLock = it }
+        val now = SystemClock.elapsedRealtime()
+        if (!lock.isHeld || now - lastWakeRenewal >= 60_000L) {
+            lock.acquire(10L * 60L * 1000L)
+            lastWakeRenewal = now
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -46,6 +75,7 @@ class BatteryMonitorService : Service() {
             return START_NOT_STICKY
         }
         cancelPendingRestart()
+        refreshSamplingWakeLock()
         scheduleRestart(WATCHDOG_INTERVAL_MS)
         if (intent?.action == Intent.ACTION_POWER_DISCONNECTED) {
             scope.launch {
@@ -68,23 +98,39 @@ class BatteryMonitorService : Service() {
         if (monitorJob?.isActive != true) {
             monitorJob = scope.launch {
                 val repository = (application as ChargeMeterApplication).repository
-                var lastRecordedAt = 0L
-                var lastFluidCloudAt = 0L
-                while (isActive) {
-                    val reading = reader.read()
-                    updateNotifications(reading)
-                    if (reading.timestamp - lastRecordedAt >= SAMPLE_INTERVAL_MS) {
-                        runCatching {
-                            repository.record(reading)
-                            repository.recordForegroundPower(appUsageReader.currentForegroundPackage(), reading)
+                var lastRecordedAt = -SAMPLE_INTERVAL_MS
+                var lastFluidCloudAt = -FLUID_CLOUD_INTERVAL_MS
+                try {
+                    while (isActive) {
+                        refreshSamplingWakeLock()
+                        try {
+                            val reading = reader.read()
+                            val elapsed = SystemClock.elapsedRealtime()
+                            updateNotifications(reading)
+                            if (elapsed - lastRecordedAt >= SAMPLE_INTERVAL_MS) {
+                                val foregroundPackage = runCatching { appUsageReader.currentForegroundPackage() }
+                                    .getOrNull()
+                                repository.record(reading, foregroundPackage)
+                                lastRecordedAt = elapsed
+                                try { repository.cleanupHistory(reading.timestamp) }
+                                catch (cancelled: CancellationException) { throw cancelled }
+                                catch (error: Exception) { android.util.Log.e("ChargeMeterMonitor", "History cleanup failed", error) }
+                            }
+                            if (elapsed - lastFluidCloudAt >= FLUID_CLOUD_INTERVAL_MS) {
+                                fluidCloudPublisher.publish(reading)
+                                lastFluidCloudAt = elapsed
+                            }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            android.util.Log.e("ChargeMeterMonitor", "Monitoring update failed", error)
                         }
-                        lastRecordedAt = reading.timestamp
+                        delay(POLL_INTERVAL_MS)
                     }
-                    if (reading.timestamp - lastFluidCloudAt >= FLUID_CLOUD_INTERVAL_MS) {
-                        fluidCloudPublisher.publish(reading)
-                        lastFluidCloudAt = reading.timestamp
+                } finally {
+                    synchronized(this@BatteryMonitorService) {
+                        samplingWakeLock?.let { if (it.isHeld) it.release() }
                     }
-                    delay(POLL_INTERVAL_MS)
                 }
             }
         }
@@ -112,12 +158,13 @@ class BatteryMonitorService : Service() {
     }
 
     override fun onDestroy() {
-        monitorJob?.cancel()
+        synchronized(this) {
+            stopping = true
+            scope.cancel()
+            samplingWakeLock?.let { if (it.isHeld) it.release() }
+        }
         if (Build.VERSION.SDK_INT >= 36) {
             getSystemService(NotificationManager::class.java).cancel(LIVE_NOTIFICATION_ID)
-        }
-        scope.launch {
-            (application as ChargeMeterApplication).repository.record(reader.read())
         }
         if (monitorEnabled()) scheduleRestart(RESTART_AFTER_DESTROYED_MS)
         super.onDestroy()
@@ -175,19 +222,30 @@ class BatteryMonitorService : Service() {
             .build()
     }
 
+    @Synchronized
     private fun updateNotifications(reading: com.local.chargemeter.data.BatteryReading) {
         val manager = getSystemService(NotificationManager::class.java)
         // A transient notification failure must not terminate the sampling coroutine.
-        runCatching { manager.notify(NOTIFICATION_ID, batteryNotification(reading)) }
+        val content = String.format(Locale.US, "%b|%b|%.1f|%.2f|%.2f|%.1f", reading.isCharging,
+            reading.isPowerConnected, reading.powerW, reading.voltageV, reading.currentA, reading.temperatureC)
+        runCatching {
+            if (content != lastNotificationContent) {
+                manager.notify(NOTIFICATION_ID, batteryNotification(reading))
+                lastNotificationContent = content
+            }
+        }
             .onFailure { android.util.Log.e("ChargeMeterMonitor", "Monitor notification update failed", it) }
         if (Build.VERSION.SDK_INT < 36) return
         val preferences = getSharedPreferences("charge_settings", MODE_PRIVATE)
         if (!fluidCloudEnabled() || !reading.isPowerConnected) {
             manager.cancel(LIVE_NOTIFICATION_ID)
+            lastLiveContent = null
             preferences.edit().putString(FluidCloudPublisher.KEY_LAST_STATUS,
                 if (fluidCloudEnabled()) "等待连接电源" else "已关闭").apply()
             return
         }
+        val liveContent = "$content|${reading.level}"
+        if (liveContent == lastLiveContent) return
         runCatching {
             val openIntent = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -218,6 +276,7 @@ class BatteryMonitorService : Service() {
                 .build()
             // Keep one stable live-notification ID, separate from the foreground-service notification.
             manager.notify(LIVE_NOTIFICATION_ID, notification)
+            lastLiveContent = liveContent
             val statusText = if (manager.canPostPromotedNotifications()) {
                 "实时状态已更新 · " + java.text.SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(java.util.Date(reading.timestamp))
             } else "请允许系统实时通知权限"

@@ -24,6 +24,7 @@ data class ChargeSession(
     @ColumnInfo(defaultValue = "6700") val designCapacityMah: Int = 6700,
     @ColumnInfo(defaultValue = "-1") val healthStartLevel: Int = -1,
     @ColumnInfo(defaultValue = "0") val healthStartChargeCounterMah: Double = 0.0,
+    @ColumnInfo(defaultValue = "0") val maxSampleGapMs: Long = 0,
 )
 
 @Entity(
@@ -36,7 +37,7 @@ data class ChargeSession(
             onDelete = ForeignKey.CASCADE,
         ),
     ],
-    indices = [Index("sessionId"), Index("recordedAt")],
+    indices = [Index("sessionId"), Index("recordedAt"), Index(value = ["sessionId", "recordedAt"])],
 )
 data class ChargeSample(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

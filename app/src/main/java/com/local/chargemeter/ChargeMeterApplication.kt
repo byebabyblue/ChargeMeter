@@ -6,5 +6,5 @@ import com.local.chargemeter.data.ChargeRepository
 
 class ChargeMeterApplication : Application() {
     val database by lazy { ChargeDatabase.get(this) }
-    val repository by lazy { ChargeRepository(database.chargeDao()) }
+    val repository by lazy { ChargeRepository(database) }
 }
